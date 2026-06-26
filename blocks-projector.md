@@ -209,21 +209,22 @@ Arquitectura:
 - Proyecta solo cuando chunkIndex + 1 == chunkTotal
 - TTL 5 min en buffer; chunks incompletos → DLQ después
 
-**Qué existe (código — 2026-06-23):**
+**Qué existe (código — 2026-06-25):**
 - `ConsumePackageNewMilestoneNotificationHandler` + `ApplyPackageNewMilestoneUseCase` (dedupe + tx)
 - Proyección incremental: OE_LAUNCH, dispatch, OOLL (timestamps, `stateChange`, `deliveryFailureContext`)
 - `current_milestone` desde `milestoneKey` (**C.3 + C.7** — 5 keys, terminales)
 - `DeliveryHistoryView` bootstrap con `isListable: true` hardcodeado
 - `listShipments` expone `currentMilestone`
+- **Block 11 / C.5:** `delivery_history_search_index` poblado en tx de proyección (`replaceSearchIndex`)
+- **Block 11–12 / C.6:** list `q` + filtros (`courier`, `deliveryType`, `milestone`) vía `DeliveryHistorySearchRepository`
 
 **Qué falta (prioridad):**
-- Block 11: `delivery_history_search_index` en tx de proyección
 - C.2 persistencia: tabla `milestones` (HTTP catalog ✅)
 - C.4: `PackageEvent.shipmentId` por tramo activo
-- C.6: filtro list por `milestone`
 - Chunk buffer (si API particiona payload)
+- Search **performance** P1 (`search-performance-spec.md`) — lectura optimizada, no contrato HTTP
 
-**Próximo paso:** Block 11 / C.4 / C.6 filtro.
+**Próximo paso:** C.4 tramo · C.2 persistencia catálogo · SP.1 performance.
 
 ---
 
@@ -243,21 +244,20 @@ Arquitectura:
 - Vista por **tramo** (`segments[]`): `FIRST_MILE` (pre-`oeLaunchAt`) vs `LAST_MILE` (post-`oeLaunchAt`, incluye CD + carrier).
 
 **Qué existe:**
-- `listShipments` use case invoca `deliveryHistoryViewRepository.listListable()`
-- Query filtra `WHERE isListable = true`
+- `listShipments` use case → `DeliveryHistorySearchRepository.searchListable()` (con/sin `q`)
+- Query filtra `WHERE isListable = true` (+ filtros milestone/courier/deliveryType)
 - Order by `updatedAt DESC`
 - Bootstrap projection setea `displayId`, `courier`, `deliveryType`, `trackingNumber`, `orderId` en OE_LAUNCH
+- `current_milestone` derivado y persistido (**C.7** ✅)
 
 **Qué falta:**
 - Ruleset para derivar `parcel` (primary package `externalId`)
 - Ruleset para derivar `courier` estable (primaryShipment `carrierCode` o `package.currentCarrierCode`)
 - Ruleset para derivar `deliveryType` (`HD` / `SPU` desde metadata; default `HD`)
-- Derivar y persistir `current_milestone` con reglas terminales 5 keys (**C.7** — ver handoff)
-- Atribuir `PackageEvent.shipmentId` al tramo activo en cada proyección
-- Integrar **search + filtros** en el mismo endpoint (Block 11 + 12)
+- Atribuir `PackageEvent.shipmentId` al tramo activo en cada proyección (**C.4**)
 - Conectar HTTP real (`MOCKS_ENABLED=false`) una vez Block 10 cierre E2E
 
-**Próximo paso:** Completar derivaciones + delegar list query al motor de search (Block 11).
+**Próximo paso:** Derivaciones list + C.4 tramo; Block 10 E2E integrado.
 
 ---
 
@@ -643,7 +643,7 @@ GET /delivery-history/shipments?q=&courier=&deliveryType=&milestone=&limit=&offs
 
 **Contrato frontend — `backoffice-shipments-zone` / SXP (wiring con `ShipmentList`):**
 
-Integración sobre rama `feature/SXP-209-integracion-listado-envios-backend` (o equivalente). El DS (`@fravega-it/logistic-ds`) ya expone barra de búsqueda y filtros vía `filters` + `onFiltersChange`; el cableado a API es responsabilidad del zone.
+Spec dedicada: **`backoffice-list-search-integration.md`**. El DS (`@fravega-it/logistic-ds`) ya expone barra de búsqueda y filtros vía `filters` + `onFiltersChange`; el cableado a API es responsabilidad del zone (backend C.5/C.6 ✅).
 
 | Práctica | Regla MVP | Motivo |
 |----------|-----------|--------|
@@ -676,7 +676,7 @@ Integración sobre rama `feature/SXP-209-integracion-listado-envios-backend` (o 
 
 - Unit: normalizador + mapper index rows desde bootstrap OE_LAUNCH; rechazo `q` &lt; 3 chars
 - Integration: insert view + index → prefix `EP0129` devuelve view correcta; `total` coherente con filtros
-- E2E orchestrator: post C.5 — `COUNT(*) > 0` en índice; `GET ...?q=<prefix EP>` → `total >= 1`
+- E2E orchestrator (opcional): asserts SQL en índice + `GET ...?q=<prefix EP>` — hoy cubierto por `warehouse` + Artillery `search-load`
 - Sin orden comercial: búsqueda por `PACKAGE_EXTERNAL_ID` y `TRACKING` funciona; `ORDER_ID` ausente hasta reconciliar
 
 ---
@@ -699,8 +699,8 @@ Integración sobre rama `feature/SXP-209-integracion-listado-envios-backend` (o 
 
 **Qué falta:**
 - Tabla `milestones` + seeder DB (C.2 persistencia)
-- Validación query `milestone` en list contra catálogo (C.6 / Block 11)
-- Wiring FE SXP: `onFiltersChange` → `q` + filtros (ver Block 11 § contrato frontend)
+- Validación query `milestone` en list contra catálogo (opcional endurecimiento)
+- Wiring FE: `onFiltersChange` → API — spec **`backoffice-list-search-integration.md`**
 
 ---
 
@@ -804,13 +804,12 @@ Gancho existente: `deliveryLink` en gates API (`consumeOeLaunch`, dispatch, Andr
 
 **Actualizado 2026-06-25.** Status detallado: `plan.md`. Onboarding + handoff search: `prompt.md`.
 
-1. **C.5 Block 11** — search index en tx de proyección (`delivery_history_search_index`) — **NOT STARTED**
-2. **C.6** — list `q` + filtros (`milestone`, `courier`, `deliveryType`) — Block 11 lectura + Block 12 — **PARTIAL**
-3. **C.4** — `PackageEvent.shipmentId` = active trail en proyección
-4. **C.2** persistencia catálogo `milestones` (HTTP ✅)
-5. Block 13 particionado search/inbox (post-MVP)
+1. **SP.1** — search performance P1 (`search-performance-spec.md`) — query única prefix, índices parciales, select mínimo sin `q`
+2. **C.4** — `PackageEvent.shipmentId` = active trail en proyección
+3. **C.2** persistencia catálogo `milestones` (HTTP ✅)
+4. Block 13 particionado search/inbox (post-MVP)
 
-**Completado recientemente:** B.7.2 bulk relay · B.6 orchestrator E2E · Block R2 detalle v2 · C.7 terminales 5 keys.
+**Completado recientemente:** **C.5 + C.6 search** · B.7.2 bulk relay · B.6 orchestrator E2E · Block R2 detalle v2 · C.7 terminales 5 keys.
 
 ---
 
@@ -848,13 +847,11 @@ Gancho existente: `deliveryLink` en gates API (`consumeOeLaunch`, dispatch, Andr
 
 - Migration `current_milestone` ✅ C.1; lógica terminales 5 keys ✅ **C.7**
 - Particionado explícitamente **fuera de scope** hasta post-MVP (Block 13)
-- `delivery_history_search_index` existe en schema pero **no se puebla** en proyección actual
+- **Search funcional ✅ C.5 + C.6:** índice en tx de proyección; list `q` + filtros en `GET /delivery-history/shipments`; mocks decorator alineado
+- Search **performance** pendiente — `search-performance-spec.md` (SP.1); denormalización/particionado → P2 / Block 13
 - Catálogos HTTP: `logistics_operators`, `operation_types`, milestones (static/mock)
-- List HTTP sin search/filtros: solo `limit`/`offset` + mocks
-- Spec search cerrada (HTTP `q` unificado, guardrails FE/BE, paginación filtrada) — ver Block 11 § decisiones 2026-06-25
-- FE backoffice (`SXP-209`): UI search montada; wiring `onFiltersChange` → API pendiente
-- API → projector E2E no validado en entorno integrado (replay outbox pendiente)
+- Spec search cerrada (HTTP `q` unificado, guardrails FE/BE, paginación filtrada) — Block 11; integración FE → `backoffice-list-search-integration.md`
+- API → projector E2E no validado en entorno integrado (replay outbox pendiente — Block 10)
 - Mocks static from `__mocks__/deliveryHistory/*.json` (lint ruidoso en registry generado)
-- Frontend integration: consumir detalle v2 vía adapter (`Block R2` implementación) + Block 10 (mocks off)
-- Gap detalle vs backoffice: spec Block 8 §8.1 ✅ 2026-06-25 · implementación **Block R2** pending
+- Frontend: detalle v2 (**Block R2** ✅) + list search spec; wiring FE pendiente
 - Warehouse-centric schema ready; external-only cases need validation (Block 9)

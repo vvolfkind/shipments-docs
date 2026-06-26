@@ -12,10 +12,11 @@ Operational plan for `shipments-history-api/`, `shipments-history-projector/`, `
 | `domain-model.md` | Milestones, tramos, gates, watermark (sin status) |
 | `prompt.md` | Onboarding corto + links |
 | `local-testing-guide.md` | Runbook E2E §1 |
-| `local-testing-sql.md` | Queries de validación |
-| `blocks-api.md` / `blocks-projector.md` | Spec diseño por block (status desactualizado → ignorar); **search → `blocks-projector.md` Block 11–12**; OOLL → `blocks-api.md` §5.9 |
+| `blocks-api.md` / `blocks-projector.md` | Spec diseño por block (status desactualizado → ignorar); **search funcional → `plan.md` C.5–C.6**; **search perf → `search-performance-spec.md`** |
+| `backoffice-list-search-integration.md` | Contrato integración FE (list `q` + filtros) |
+| `search-performance-spec.md` | Optimizaciones pendientes de lectura search (P1/P2) |
 
-**Last updated (2026-06-25):** **B.7** bulk LPC ✅ (warehouse E2E `2026-06-25T16-59-55-015Z`; full e2e `2026-06-25T16-33-08-710Z`). **B.5.8** `OollProcessingService` ✅. **Search spec:** `q` unificado en `GET /shipments`, sin controller aparte; guardrails q≥3 + paginación filtrada (`blocks-projector.md` Block 11). **Next API:** B.7.4 docs → B.8.5 → B.6 runbook manual. **Next projector:** **C.5** search index → **C.6** list `q`/filtros → C.4 tramo en events.
+**Last updated (2026-06-25):** **C.5 + C.6 search** ✅ (índice en proyección + `GET /shipments?q` + filtros). **B.7** bulk LPC ✅; **B.5.8** `OollProcessingService` ✅. **Next projector:** search **performance** P1 (`search-performance-spec.md`) · **C.4** tramo en `PackageEvent.shipmentId` · **C.2** persistencia catálogo `milestones`. **Next API:** B.7.4 docs → B.8.5 → B.6 runbook manual.
 
 **Diseño operativo cross-cutting:** terminales `FAILED`/`CANCELLED` → **§ B.8** · Fenix bulk LPC → **§ B.7**
 
@@ -33,8 +34,9 @@ Warehouse path through dispatch gate is **coded on API** (tramos + gate payloads
 | API → projector E2E via `fenix-local` (warehouse LPC + optional OOLL) | **B.6 — PARTIAL** — orchestrator `warehouse` ✅ `2026-06-25T16-59-55-015Z`; `e2e` ✅ `2026-06-25T16-33-08-710Z`; runbook manual EP-ready → WMI pending |
 | Fenix bulk relay (`/api/event/bulk`) in API producer | **B.7 — DONE (core)** — B.7.0–B.7.3 ✅; B.7.4 docs pending; warehouse E2E `2026-06-25T16-59-55-015Z` |
 | **`FAILED` / `CANCELLED` milestones (API emission)** | **B.8 — PARTIAL** (B.8.1–B.8.4, B.8.6–B.8.7 ✅; B.8.5 manual cancel pending) |
-| Projector `current_milestone` + `milestoneKey` handling | **Fase C — PARTIAL** (C.1 + C.3 + **C.7** ✅; C.4–C.6 pending) |
-| Search index on projection | **Fase C — NOT STARTED** |
+| Projector `current_milestone` + `milestoneKey` handling | **Fase C — PARTIAL** (C.1 + C.3 + **C.7** ✅; **C.5 + C.6** ✅; C.4 pending) |
+| Search index + list `q`/filtros | **Fase C — DONE (C.5 + C.6)** |
+| Search lectura — performance P1 | **PENDING** — `search-performance-spec.md` (funcionalidad cerrada) |
 | Detalle HTTP v2 (`GetShipmentDetailOutputDto`) | **Block R2 — DONE** (spec §8.1 ✅; mocks regenerados; E2E manual con `MOCKS_ENABLED=true`) |
 
 ---
@@ -53,6 +55,7 @@ Warehouse path through dispatch gate is **coded on API** (tramos + gate payloads
 | API Block 5 Andreani | **DONE (MVP v1)** | `consumeAndreaniEvents.useCase.ts`, `repositories/andreani/`, `application/oollProcessing/` | B.5.1–B.5.8 ✅ |
 | Projector bootstrap consumer | **DONE (C.3 minimal)** | `applyPackageNewMilestone.useCase.ts` | Sets `current_milestone` from `milestoneKey` (forward-only pipeline) |
 | Projector `current_milestone` | **DONE (C.1 + C.3 + C.7)** | migration + mapper terminales | C.2 catalog HTTP ✅ (static); tabla `milestones` pending |
+| Search index + list `q`/filtros | **DONE (C.5 + C.6)** | `packageNewMilestoneProjection` + `deliveryHistorySearch` repository | Mocks decorator + Artillery load ✅; perf P1 → `search-performance-spec.md` |
 | Projector milestone catalog | **PARTIAL (C.2)** | `catalog.controller.ts`, `repositories/catalog/milestoneCatalog.data.ts` | HTTP + mock; persistencia pending |
 | API → Projector E2E | **PARTIAL (B.6)** | `testing-orchestrator` | `warehouse` ✅ `2026-06-25T16-59-55-015Z`; `e2e` ✅ `2026-06-25T16-33-08-710Z`; runbook manual pending |
 | `fenix-local` | **DONE (generator emulator)** | `fenix-local/index.js`, `lib/gateway.js` | `/api/event`, `/api/event/bulk`; legacy `/publish` |
@@ -344,10 +347,17 @@ Post-gate listable — ejemplo payload:
 | C.2 | Milestone catalog HTTP + mock (`MOCKS_ENABLED`); tabla `milestones` + seeder | `catalog.controller.ts`, `repositories/catalog/`, `seedAppConfig.ts` | **PARTIAL** — endpoint ✅; persistencia pending |
 | C.3 | Projection mapper: set `current_milestone` from `milestoneKey` | `packageNewMilestoneProjection.repository.mapper.ts` | **DONE** |
 | C.4 | `PackageEvent.shipmentId` = active trail on each projection | same mapper | NOT STARTED |
-| C.5 | Block 11: populate `delivery_history_search_index` in projection tx | projection repository | NOT STARTED |
-| C.6 | Block 11 lectura + Block 12: `GET /shipments?q=&courier=&deliveryType=&milestone=` (mismo controller; repos/use case search **internos**) | `listShipments` + `deliveryHistorySearch` repository stack | **PARTIAL** — `currentMilestone` en row; `q`/filtros pending |
+| C.5 | Block 11: populate `delivery_history_search_index` in projection tx | projection repository + mapper | **DONE** |
+| C.6 | Block 11 lectura + Block 12: `GET /shipments?q=&courier=&deliveryType=&milestone=` | `deliveryHistorySearch` repository + `listShipments` | **DONE** |
 | C.7 | Terminales 5 keys: Zod, `resolveCurrentMilestone`, tests | ingestor DTO + mapper | **DONE** — reglas § B.8 |
 | R2 | Detalle v2: DTO datos normalizados + mocks regenerados — spec `blocks-projector.md` §8.1 | `getShipmentDetail.dto.ts`, use case, `generateDeliveryHistoryMocks.ts` | **DONE** (validar local: `MOCKS_ENABLED=true` + list → detail) |
+
+**Search — performance (post C.5/C.6, funcionalidad cerrada):**
+
+| ID | Task | Spec | Status |
+|----|------|------|--------|
+| SP.1 | P1: query única prefix + `select` mínimo list sin `q` + índices parciales listables | `search-performance-spec.md` §P1 | **PENDING** |
+| SP.2 | P2: denormalización índice / Block 13 particionado | `search-performance-spec.md` §P2 · Block 13 | **DEFERRED** |
 
 ---
 

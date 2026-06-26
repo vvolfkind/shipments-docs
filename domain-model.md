@@ -435,7 +435,8 @@ Desvíos abiertos (2026-06-24):
 | Cancel manual API | B.8.5 |
 | `collectedAt` consumer primera milla | TBD |
 | Catálogo milestones DB | C.2 persistencia (HTTP ✅) |
-| Search index + tramo en eventos | **C.5** (search) → **C.4** (tramo) — `blocks-projector.md` Block 11 |
+| Search index + list `q`/filtros | **DONE (C.5 + C.6)** · perf → `search-performance-spec.md` SP.1 |
+| Tramo en `PackageEvent.shipmentId` | **C.4** — `blocks-projector.md` Block 6 |
 
 El resto del camino warehouse + OOLL MVP v1 está alineado con este doc (ver evidencia en `plan.md` Ground Truth).
 
@@ -448,7 +449,6 @@ El resto del camino warehouse + OOLL MVP v1 está alineado con este doc (ver evi
 | Plan operativo + status | **`plan.md`** |
 | Onboarding | `prompt.md` |
 | E2E local | `local-testing-guide.md` |
-| SQL validación | `local-testing-sql.md` |
 | Fenix bulk relay | `plan.md` § B.7 |
 | Terminales FAILED / CANCELLED | `plan.md` § B.8 |
 | Blocks API | `blocks-api.md` |

@@ -2,6 +2,7 @@
 
 **Estado:** TENTATIVE — 2026-06-25  
 **Alcance:** `shipments-history-projector` — lectura de `GET /delivery-history/shipments`  
+**Prerequisito funcional:** C.5 + C.6 **DONE** (`plan.md`) — contrato HTTP y población de índice cerrados; este doc cubre **solo optimización de lectura**.  
 **Referencias:** `rfc2.md` §7.3, `blocks-projector.md` Block 11, benchmarks Artillery (`testing-orchestrator/runs/`)
 
 ---

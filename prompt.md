@@ -1,6 +1,6 @@
 # Prompt — Onboarding (delivery-history)
 
-Onboarding mínimo para agentes. **No duplica status** — eso vive solo en `plan.md`.
+Onboarding/preflight mínimo para agentes. **No duplica status** — eso vive solo en `plan.md`.
 
 ---
 
@@ -18,6 +18,37 @@ Proyectos: `shipments-history-api/`, `shipments-history-projector/`, `fenix-loca
 
 ---
 
+## Runtime, MCP Postgres y terminal (CRÍTICO)
+
+### Quién corre qué
+
+| Acción | Agente | Usuario |
+|--------|--------|---------|
+| Levantar servicios (`start:dev`, Docker, fenix-local, API, projector) | **NUNCA** | Sí |
+| `npm run build` / `npm test` / `npm run lint` / Artillery / orchestrator | **NUNCA** | Sí |
+| Editar código, leer docs, razonar sobre diffs | Sí | — |
+| SQL read-only para validar estado post-run del usuario | Sí, controlado | — |
+
+**El usuario es el único con potestad de ejecutar procesos en terminal** (servicios, builds, tests, linters, seeds pesados, `testing-orchestrator`). Los agentes **no** arrancan el proyecto ni verifican compilación corriendo comandos — asumen que el usuario ya levantó lo necesario o lo hará después del cambio.
+
+### MCP Postgres (`shipments-history-postgres`)
+
+Disponible en sesión. Postgres local es **multidb** en `localhost:5432`:
+
+| DB | Proyecto |
+|----|----------|
+| `shipments-history-api` | API (write model) |
+| `shipments-history-projector` | Projector (read model) |
+
+- **Un proyecto por turno/sesión** en la práctica → conectar mentalmente a **una** DB según el target (`POSTGRES_DATABASE_URL` en `.env.example` de cada repo).
+- **Queries cross-DB no son opción ni necesidad.** Si la tarea toca ambos lados, validar **cada DB por separado** — típicamente después de que el usuario corrió `testing-orchestrator` (`warehouse` / `e2e`).
+- Usar MCP (`execute_sql`, `list_objects`, …) o `psql` **solo lectura** para confirmar hipótesis (ej. conteos, `delivery_history_view_shipments`, outbox) — no para mutar datos salvo pedido explícito de migración/seed en código.
+- **Magnitud:** el projector puede tener cientos de miles de views. Evitar `SELECT *` sin `LIMIT`, scans full-table innecesarios o agregados pesados. Preferir filtros por `id` / `display_id` / muestra acotada. Referencia: `local-testing-quide.md`.
+
+Si MCP conecta a la DB `postgres` (maintenance), las tablas de app están en las DB nombradas arriba — cambiar la URL mental según proyecto target; no hace falta unificar en una sola query.
+
+---
+
 ## Mapa de documentos
 
 | Pregunta | Leer |
@@ -26,13 +57,15 @@ Proyectos: `shipments-history-api/`, `shipments-history-projector/`, `fenix-loca
 | ¿Qué es un MilestoneKey / tramo / gate? | **`domain-model.md`** |
 | ¿Cómo corro E2E local? | **`local-testing-guide.md`** §1 |
 | ¿E2E automatizado (warehouse / andreani / full)? | **`testing-orchestrator/README.md`** |
-| ¿Queries SQL de validación? | **`local-testing-sql.md`** |
+| ¿Queries SQL de validación? | **`local-testing-guide.md`** · MCP Postgres (read-only, ver § Runtime) |
 | ¿Contrato Fenix bulk / relay LPC? | **`plan.md` § B.7** |
 | ¿Payload / blocks API? | **`blocks-api.md`** (spec diseño) |
 | ¿Contrato detalle HTTP v2 / Block R2? | **`blocks-projector.md`** Block 8 §8.1 + Block R2 |
 | ¿Integración detalle ↔ backoffice (mapeo FE)? | **`detail-api-frontend-contract.md`** |
 | ¿Blocks projector? | **`blocks-projector.md`** (spec diseño) |
-| **¿Search index + list `q` + filtros?** | **`blocks-projector.md` Block 11 + Block 12** · **`plan.md` C.5–C.6** |
+| **¿Search index + list `q` + filtros?** | **`plan.md` C.5–C.6** (funcional) · **`blocks-projector.md` Block 11–12** (diseño) |
+| **¿Integración FE search?** | **`backoffice-list-search-integration.md`** |
+| **¿Search performance / load test?** | **`search-performance-spec.md`** · `testing-orchestrator` `search-load` |
 | ¿Patrón search origen (RFC2)? | **`rfc2.md` §7.3** (nombre viejo `shipment_search_index`) |
 | ¿Terminales FAILED / CANCELLED / listabilidad? | **`plan.md` § B.8** |
 | ¿OOLL timestamps / mapeo Andreani? | **`domain-model.md`** §1.1, §4.4 · **`blocks-api.md` §5.9** |
@@ -86,53 +119,49 @@ Ver detalle en **`plan.md`**. Resumen:
 
 - **Fase A** tramos API — DONE
 - **Fase B** gates + watermark + Andreani B.5 + **B.5.8 `OollProcessingService`** + **B.7 bulk LPC** + **B.8 terminales FAILED/CANCELLED** — DONE (B.8.5 manual cancel pending; B.7.4 docs pending)
-- **Fase C** C.1 + C.3 + **C.7** + **C.2 HTTP catalog (mock/static)** — DONE / PARTIAL (tabla `milestones` pending)
-- **Block R2** detalle v2 — **DONE** (DTO + mocks); validar: list → detail con `MOCKS_ENABLED=true`
+- **Fase C** C.1 + C.3 + **C.7** + **C.5 + C.6 search** + **C.2 HTTP catalog (mock/static)** — DONE / PARTIAL (tabla `milestones` pending; **C.4** tramo pending)
+- **Block R2** detalle v2 — **DONE**
 - **fenix-local** `/api/event` + `/api/event/bulk` — DONE
-- **E2E orchestrator** — `warehouse` ✅ `2026-06-25T16-59-55-015Z`; `e2e` ✅ `2026-06-25T16-33-08-710Z`
+- **E2E orchestrator** — `warehouse` ✅ · `e2e` ✅ · **search-load** Artillery ✅
 - **Next API (secundario):** B.7.4 docs → B.8.5 manual cancel → B.6 runbook manual EP-ready→WMI
-- **Next projector (prioridad):** **C.5 Block 11 search index** → C.6 list filters (`q`, `milestone`, …) → C.4 tramo en events
+- **Next projector:** search **performance** P1 (`search-performance-spec.md`) · **C.4** · **C.2** persistencia `milestones`
 
-### Search — estado y gap
+### Search — estado
 
 | Pieza | Estado |
 |-------|--------|
-| Tabla `delivery_history_search_index` (schema + índices prefix) | ✅ existe, **vacía** |
-| Poblado en tx de proyección (`PACKAGE_NEW_MILESTONE`) | ❌ **C.5 NOT STARTED** |
-| List HTTP con `q` + filtros | ❌ **C.6 PARTIAL** (solo `limit`/`offset`; mocks si `MOCKS_ENABLED`) |
-| Código search en projector (`src/`) | ❌ sin repository/use case dedicado |
-| E2E orchestrator valida search | ❌ no cubre `q` ni prefix scan |
+| C.5 índice en tx de proyección | ✅ **DONE** |
+| C.6 list `q` + filtros (`courier`, `deliveryType`, `milestone`) | ✅ **DONE** |
+| Mocks decorator (filtros en memoria) | ✅ |
+| Artillery `search-load` / `search-artillery` | ✅ |
+| Performance lectura P1 (query única, índices parciales, select mínimo) | ❌ **PENDING** — `search-performance-spec.md` |
+| Índices ampliados / denormalización / Block 13 | ❌ **DEFERRED** (P2) |
+| Integración FE (`onFiltersChange` → API) | Spec en **`backoffice-list-search-integration.md`** |
 
-Spec cerrada: **`blocks-projector.md` Block 11** (escritura + lectura + guardrails FE/BE) + **Block 12** (filtros/facetas). Patrón histórico: **`rfc2.md` §7.3`.
+Spec funcional: **`blocks-projector.md` Block 11** + **Block 12**. Patrón origen: **`rfc2.md` §7.3**.
 
-**Decisiones HTTP (2026-06-25):** `q` en el mismo `GET /delivery-history/shipments` — **sin** `SearchController` ni ruta `/search`. Repos/use case de search **internos** al módulo `deliveryHistory`. Paginación: `total` = matches filtrados; primera página puede traer &lt; `limit` filas. Mínimo **3** caracteres en `q` (FE no dispara request antes; BE rechaza con 400 si llega más corto). Debounce FE recomendado: **300 ms**.
+**Decisiones HTTP (cerradas):** `q` en `GET /delivery-history/shipments` — sin controller aparte. Paginación: `total` = conjunto filtrado. Mínimo **3** chars en `q` (BE 400 / FE no dispara antes). Debounce FE **300 ms** — ver `backoffice-list-search-integration.md`.
 
 ---
 
 ## Handoff — orden de lectura (nuevo agente)
 
-Copiar el bloque **«Prompt handoff»** al final de este archivo como primer mensaje al agente entrante.
-
-1. **`prompt.md`** (este archivo) — reglas + mapa
-2. **`plan.md`** — status único; foco **Fase C C.5–C.6**
+1. **`prompt.md`** (este archivo) — reglas + mapa + **§ Runtime/MCP** (no `start:dev` / no build-test-lint)
+2. **`plan.md`** — status único
 3. **`domain-model.md`** §4 (`MilestoneKey`, `current_milestone`, listabilidad)
-4. **`blocks-projector.md` Block 11** → Block 12 → Known Constraints (§ final)
-5. **`AGENTS.md`** workspace + `shipments-history-projector/AGENTS.md` — patrones repository/mapper
-6. Código existente (solo lectura inicial):
-   - `shipments-history-projector/src/infrastructure/database/schema.prisma` (`DeliveryHistorySearchIndex`)
-   - `.../packageNewMilestoneProjection.repository.mapper.ts` (punto de extensión C.5)
-   - `.../useCases/listShipments.useCase.ts` (punto de extensión C.6)
-7. **`testing-orchestrator/README.md`** — validar proyección post-implement (extender asserts search cuando exista `q`)
-8. API/blocks-api **solo si** la tarea toca emisión; search es **100% projector**
+4. **`blocks-projector.md` Block 11** → Block 12 (diseño search; status en `plan.md`)
+5. **`AGENTS.md`** workspace + `shipments-history-projector/AGENTS.md`
+6. Si search performance: **`search-performance-spec.md`**
+7. Si integración FE: **`backoffice-list-search-integration.md`**
 
 ---
 
 ## Antes de codear
 
 1. `domain-model.md` (gates / watermark si tocás emisión; §4 si tocás search/milestone)
-2. `plan.md` (task concreta — **C.5** o **C.6**)
-3. Block relevante en `blocks-api.md` o `blocks-projector.md` (**Block 11/12** para search)
-4. `AGENTS.md` del proyecto target (`shipments-history-projector` para search)
+2. `plan.md` (task concreta)
+3. Block relevante en `blocks-api.md` o `blocks-projector.md`; search perf → `search-performance-spec.md`
+4. `AGENTS.md` del proyecto target
 5. Si detalle HTTP: `blocks-projector.md` Block 8 §8.1 + Block R2
 6. Si Fenix/E2E: `local-testing-guide.md` §1 o `testing-orchestrator/`
 
@@ -140,9 +169,11 @@ Copiar el bloque **«Prompt handoff»** al final de este archivo como primer men
 
 ---
 
-## Quick start local
+## Quick start local (solo usuario — agentes no ejecutan)
 
-Ver **`local-testing-guide.md`** §1 (copy-paste). Scripts clave en API:
+Comandos de **`local-testing-guide.md`** §1 son **copy-paste del operador humano**, no tareas del agente. El agente puede citarlos o indicar qué validar después; **no** los corre en terminal.
+
+Scripts clave en API (usuario):
 
 - `npm run db:seed:app-config` / `db:seed:status-mappings`
 - `seedEpReadyToCollectOrders.js --base-url=http://localhost:9100/api/v1`
@@ -160,36 +191,4 @@ Manual consume: `POST /api/v1/ingestor/fenix-queue/consume` — tabla de flows e
 3. **`blocks-*.md`** — spec de diseño por block (status puede estar desactualizado)
 4. Este prompt — solo onboarding
 
----
 
-## Prompt handoff (copiar al chat)
-
-```
-Context switch: delivery-history monorepo. Prioridad = feature SEARCH en shipments-history-projector.
-
-Lee en este orden antes de codear:
-1. prompt.md
-2. plan.md (Fase C: C.5 Block 11 search index → C.6 list filters)
-3. domain-model.md §4 (MilestoneKey, current_milestone, listabilidad)
-4. blocks-projector.md Block 11 + Block 12 + Known Constraints (final)
-5. AGENTS.md (workspace) + shipments-history-projector/AGENTS.md
-
-Contexto ya cerrado (no reimplementar):
-- API warehouse path + OOLL Andreani + bulk LPC (B.5–B.7) — DONE
-- E2E orchestrator warehouse + e2e — runs 2026-06-25T16-59-55-015Z / 2026-06-25T16-33-08-710Z
-- Projector C.1/C.3/C.7 current_milestone + Block R2 detalle v2 — DONE
-
-Tu objetivo (SEARCH):
-- C.5: poblar delivery_history_search_index en la misma tx que DeliveryHistoryView (delete por view_id + insert tokens normalizados). Spec: blocks-projector.md Block 11. Mapper boundary obligatorio.
-- C.6: GET /delivery-history/shipments?q=&courier=&deliveryType=&milestone= — mismo controller (sin SearchController); prefix scan + filtros + paginación sobre conjunto filtrado. Spec: Block 11 lectura + Block 12 + guardrails (q mín. 3 chars, debounce FE 300ms).
-- Tabla e índices ya existen en schema; hoy NO se puebla. List actual = limit/offset + mocks.
-
-Reglas: no modificar framework/ ni AGENTS.md per-project. No editar mocks a mano — regenerar con scripts. Tests fase 2 salvo pedido explícito.
-
-Archivos de entrada sugeridos:
-- schema: shipments-history-projector/src/infrastructure/database/schema.prisma (DeliveryHistorySearchIndex)
-- proyección: packageNewMilestoneProjection.repository.mapper.ts + repository
-- list: listShipments.useCase.ts + listShipments.dto.ts
-
-Validación: tras implementar, extender testing-orchestrator o SQL local (local-testing-sql.md) para assert prefix search; orchestrator hoy NO valida q.
-```
