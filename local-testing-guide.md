@@ -218,13 +218,47 @@ docker stop postgres-projector-250k 2>/dev/null; docker start postgres-projector
 
 Reiniciar el **projector** tras cambiar `.env` (pool Prisma al boot). Para search-load no hace falta la API si `MOCKS_ENABLED=false` y solo corrés Artillery.
 
-**SP.1 prerequisite:** run `npm run db:migrate` in projector (partial indexes migration `20260626140000_add_listable_view_partial_indexes`) before benchmarking.
+**SP.1 prerequisite:** run `npm run db:migrate` in projector (partial indexes migration `20260629140000_add_listable_view_partial_indexes`) before benchmarking.
+
+### 2.3.1 Perfiles Artillery y dataset (E2E vs seeder)
+
+El preflight de `testing-orchestrator` **detecta** el dataset en `delivery_history_views` y **corta** si el perfil no coincide. No mezcles seeder masivo con E2E en la misma DB para search-load.
+
+| Perfil npm | Dataset requerido | Origen de `q=` (prefixes) |
+|------------|-------------------|---------------------------|
+| `search-load` (gate) | **E2E** (tras `npm run e2e` o `validate`) | `delivery_history_search_index` (IDs del orchestrator) |
+| `search-load:realistic` | **E2E** | índice DB |
+| `search-load:smoke` (standalone) | **seeder** (`EP000000001N…`) | fórmula `seedSearchPrefixes.js` |
+| `search-load:stress` | **seeder** (≥250k views) | fórmula seeder |
+| `search-load:all` | **seeder** (smoke + stress; sin realistic) | fórmula seeder |
+
+**Detección:** si ≥90% de `display_id` listables son `EP000000…` (o `min_display_id = EP000000001N-01`) → **seeder**; si no → **E2E**.
+
+**Flujos típicos:**
+
+```bash
+# CI / regresión funcional + search sobre datos E2E (~198 views)
+cd testing-orchestrator
+npm run validate          # e2e → search gate (smoke + realistic, ambos con prefixes E2E)
+
+# Benchmark SP.1 en 250k (DB dedicada, seeder)
+docker start postgres-projector-250k   # ver §2.3
+cd shipments-history-projector
+POSTGRES_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/shipments-history-projector \
+  npm run db:seed:bootstrap
+POSTGRES_DATABASE_URL=... npm run db:seed:delivery-history -- --count=250000
+cd ../testing-orchestrator
+npm run search-load:smoke
+npm run search-load:stress
+```
+
+Variables: `ARTILLERY_E2E_MIN_VIEWS` (default 50), `ARTILLERY_MIN_VIEWS`, `ARTILLERY_STRESS_RECOMMENDED_VIEWS`, `ARTILLERY_SEED_COUNT` (override del count para fórmula seeder).
 
 ```bash
 cd testing-orchestrator
-npm run search-load        # gate = smoke + realistic (~3 min)
-npm run search-load:smoke  # ~45s quick check
-npm run validate           # full e2e then search gate
+npm run search-load        # gate = smoke + realistic (~3 min, E2E DB)
+npm run search-load:smoke  # ~45s (seeder DB)
+npm run validate           # e2e completo → search gate
 ```
 
 ### 2.4 Qué no hacer
