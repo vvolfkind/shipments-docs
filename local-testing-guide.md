@@ -1,6 +1,6 @@
 # Guía local — E2E (API + fenix-local + projector)
 
-**Última actualización:** 2026-06-25 · **Status:** `plan.md`
+**Última actualización:** 2026-06-26 · **Status:** `plan.md`
 
 | Servicio | Puerto |
 |----------|--------|
@@ -218,9 +218,13 @@ docker stop postgres-projector-250k 2>/dev/null; docker start postgres-projector
 
 Reiniciar el **projector** tras cambiar `.env` (pool Prisma al boot). Para search-load no hace falta la API si `MOCKS_ENABLED=false` y solo corrés Artillery.
 
+**SP.1 prerequisite:** run `npm run db:migrate` in projector (partial indexes migration `20260626140000_add_listable_view_partial_indexes`) before benchmarking.
+
 ```bash
 cd testing-orchestrator
-npm run search-load
+npm run search-load        # gate = smoke + realistic (~3 min)
+npm run search-load:smoke  # ~45s quick check
+npm run validate           # full e2e then search gate
 ```
 
 ### 2.4 Qué no hacer

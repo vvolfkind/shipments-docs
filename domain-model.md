@@ -1,6 +1,6 @@
 # Domain Model — Milestones, Tramos, Estados y Gates
 
-**Status:** FINAL (2026-06-24) — catálogo 5 `MilestoneKey` + terminales `FAILED`/`CANCELLED` (operativa → `plan.md` § B.8)  
+**Status:** FINAL (2026-06-26) — last-mile terminals: only **`DELIVERED`** closes v1 cycle; **`FAILED`** projects without terminal; **`CANCELLED`** manual out of active scope.  
 **Authority:** Este documento es la fuente de verdad para definiciones de dominio. Si `blocks-api.md`, `blocks-projector.md` o `logistics.md` contradicen este archivo, **este archivo gana** hasta que se actualicen explícitamente.
 
 **Alcance:** `shipments-history-api/`, `shipments-history-projector/`, contrato `PACKAGE_NEW_MILESTONE`.
@@ -48,9 +48,9 @@ Desde herramientas actuales de negocio, un package que fue anunciado listo para 
 | Valor | Cuándo | Notas |
 |-------|--------|-------|
 | `IN_TRANSIT` | Ciclo operativo normal (warehouse + checkpoints OOLL sin cierre) | Default hasta terminal |
-| `DELIVERED` | Entrega confirmada por OOLL | Terminal éxito; macro = `MilestoneKey` |
-| `FAILED` | Fallo de entrega OOLL (reintentable o terminal) | Macro = milestone solo en fallo **terminal**; reintentable: macro `FAILED`, milestone sin avanzar |
-| `CANCELLED` | Cancelación manual o carrier `Anulada` | Terminal **absoluto**; macro = `MilestoneKey` |
+| `DELIVERED` | Entrega confirmada por OOLL | **Terminal éxito** v1 — macro = `MilestoneKey` |
+| `FAILED` | Fallo de entrega OOLL | Macro transitorio — **proyecta siempre**; **no** cierra ciclo; grilla mantiene último progreso |
+| `CANCELLED` | Cancelación | Terminal dominio — flujo manual; **fuera de scope v1 activo** |
 | `CREATED` / internos | Solo draft API (`DRAFT_BASE`) | **No** proyectable |
 
 Warehouse (`oeLaunchAt`…`dispatchedAt`) y checkpoints OOLL no-fallidos ocurren con macro **`IN_TRANSIT`**. Tras un fallo OOLL reintentable, macro pasa a **`FAILED`** hasta entrega (`DELIVERED`) u otro checkpoint que negocio defina. La fase warehouse se expresa por **tramo**, **timestamps operativos** y **`MilestoneKey`**, no por un `canonicalStatus` aparte tipo `WAREHOUSE_PROCESSING`.
@@ -75,9 +75,7 @@ Pasos que negocio hoy mezcla con "estado" pero ingeniería trata como **evidenci
 | Salida CD | `dispatchedAt` | `LAST_MILE_DISPATCHED` |
 | Última milla OOLL | `pickedUpByCarrierAt`, `consolidatedAtCarrierAt`, `inTransitAt` | Proyección **obligatoria** (capa B+C); macro `IN_TRANSIT`; sin nuevo `MilestoneKey` de progreso |
 | Entrega | `deliveredAt` | `DELIVERED` (macro + milestone) |
-| Entrega fallida reintentable | — (sin timestamp nuevo) | Proyección **obligatoria**: macro `FAILED` + `subStatus` + `deliveryFailureContext`; **sin** `MilestoneKey` |
-| Entrega fallida terminal | — | Proyección **obligatoria**: macro `FAILED` + `milestoneKey: FAILED` + `deliveryFailureContext` (subset mapeos carrier — ver spec) |
-| Cancelación | — | `CANCELLED` (macro + milestone) solo **post-gate listable**; pre-gate: persist API, sin grilla |
+| Entrega fallida OOLL | — | Proyección **obligatoria**: macro `FAILED` + `subStatus` + `deliveryFailureContext`; **sin** `milestoneKey`; **no** terminal |
 
 ---
 
@@ -138,8 +136,8 @@ Detail ya expone `segments[]` por `Shipment.trailType`. Con tramos bien acotados
 | `WAREHOUSE_RECEIVED` | Recibido en depósito | `WM2_RS_MAIN_OE_LAUNCH` | `OE_LAUNCH` |
 | `LAST_MILE_DISPATCHED` | Despachado a última milla | `CONTAINER_PACKAGES_SHIPPED` | `WAREHOUSE_DISPATCH` |
 | `DELIVERED` | Entregado | OOLL entrega confirmada | `OOLL_DELIVERED` |
-| `FAILED` | Entrega fallida | OOLL fallo terminal (subset mapeos) o macro transitorio sin milestone | `OOLL_DELIVERY_FAILED` |
-| `CANCELLED` | Cancelado | Manual declarativo; Andreani `Anulada` | `MANUAL_CANCEL` / `OOLL_CANCELLED` |
+| `FAILED` | Entrega fallida | Macro OOLL — **no** gate terminal v1 | — |
+| `CANCELLED` | Cancelado | Manual / `Anulada` — fuera scope v1 activo | `MANUAL_CANCEL` / `OOLL_CANCELLED` |
 
 **Grilla (`current_milestone`):** valor = último `MilestoneKey` aplicado según reglas §4.3 (no el último timestamp operativo). Macro `FAILED` reintentable **no** avanza milestone de grilla.
 
@@ -149,18 +147,16 @@ Detail ya expone `segments[]` por `Shipment.trailType`. Con tramos bien acotados
 
 **Progreso** (orden estricto forward-only): `WAREHOUSE_RECEIVED` → `LAST_MILE_DISPATCHED`.
 
-**Terminales** (reglas especiales):
+**Terminales v1 (cierre ciclo):** solo **`DELIVERED`**.
 
 | Regla | Descripción |
 |-------|-------------|
-| `FAILED` → `DELIVERED` | **Permitido** — n fallos pueden terminar en entrega |
-| `DELIVERED` → `FAILED` | **Prohibido** |
-| `*` → `CANCELLED` | Permitido solo post-gate listable |
-| `CANCELLED` → `*` | **Prohibido** — terminal absoluto |
-| Checkpoint OOLL reintentable | Macro `FAILED`; **no** cambia `current_milestone` de progreso |
-| Fallo terminal (mapeo) | Macro + milestone `FAILED` |
+| Macro `FAILED` → proyección | Siempre; **no** avanza `current_milestone` |
+| Macro `FAILED` → `DELIVERED` | Permitido (reintentos OOLL) |
+| `DELIVERED` → `FAILED` | Prohibido |
+| `CANCELLED` | Fuera scope v1 activo (manual) |
 
-Implementación projector: `plan.md` **C.7** ✅. Reglas operativas: `plan.md` § **B.8**.
+Implementación projector: `plan.md` **C.7** ✅.
 
 ### 4.2 Qué empaqueta cada gate
 
@@ -224,7 +220,7 @@ Consolida operativa CD. **No** hay gate separado por clasificación.
 - Solo tramo **`LAST_MILE`** (post-`oeLaunchAt`) salvo flujos non-warehouse futuros.
 - Matriz Andreani raw → par → timestamp: **§4.4**.
 - Checkpoints OOLL (admisión, consolidación, distribución): macro `IN_TRANSIT`; sin avance de milestone de progreso.
-- **`MilestoneKey` de progreso** no avanza salvo gates warehouse; terminales OOLL: `DELIVERED`, `FAILED` (subset), `CANCELLED` (`Anulada`).
+- **`MilestoneKey` de progreso** no avanza salvo gates warehouse; único cierre v1: **`DELIVERED`**. Fallos OOLL: macro `FAILED` sin `milestoneKey`.
 - Projector debe recibir `stateChange` en cada aviso relevante.
 
 Ejemplo checkpoint OOLL (sin `MilestoneKey`):
@@ -240,10 +236,9 @@ Ejemplo checkpoint OOLL (sin `MilestoneKey`):
 }
 ```
 
-**Entrega fallida reintentable** (`Entrega fallida`):
-- **Sí** proyecta (sin timestamp nuevo, **sin** `MilestoneKey`).
-- Macro **`FAILED`** en `stateChange`.
-- Incluir `deliveryFailureContext` cuando el carrier lo envíe:
+**Entrega fallida OOLL:**
+- **Sí** proyecta (sin timestamp nuevo, **sin** `milestoneKey`).
+- Macro **`FAILED`** — **no** terminal; ciclo puede continuar hasta `DELIVERED`.
 
 ```json
 {
@@ -253,24 +248,33 @@ Ejemplo checkpoint OOLL (sin `MilestoneKey`):
     "lastOccurredAt": "2026-06-13T16:45:00.000Z"
   },
   "deliveryFailureContext": {
-    "reasonCode": "DESTINATARIO_AUSENTE",
+    "reasonCode": "50",
     "reasonLabel": "Destinatario ausente",
-    "comment": "No atiende, timbre sin respuesta"
+    "comment": "Domicilio cerrado"
   }
 }
 ```
 
-**Entrega fallida terminal** (mapeos carrier marcados — fase 2 API): mismo payload + `"milestoneKey": "FAILED"`.
+**Andreani v1 wire mapping** (`andreani-webhook` pass-through → `andreaniOoll.adapter.ts`):
 
-| Campo | Obligatorio | Notas |
-|-------|-------------|-------|
-| `reasonCode` | Sí (si hay falla) | Motivo pre-establecido del catálogo carrier |
-| `reasonLabel` | No | Label normalizado para UI |
-| `comment` | No | Texto libre del operador; persistir **solo si llega** |
+| Raw Andreani | Projected field | Notes |
+|--------------|-----------------|-------|
+| `motivo` | `reasonCode` | Carrier code string (e.g. `"50"`) |
+| `motivoDesc` | `reasonLabel` | Catalog label; omitted if `*` or empty |
+| `subMotivoDesc` | `comment` | Courier / sub-reason detail; omitted if `*` or empty |
+| `subMotivo` | — | Status-mapping lookup only; not sent to projector |
+
+Include `deliveryFailureContext` when the carrier sends failure data (`reasonCode` required when failure is typed).
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `reasonCode` | Yes (if failure) | v1 Andreani: `motivo`; normalized semantic slug deferred post-v1 |
+| `reasonLabel` | No | v1 Andreani: `motivoDesc` when not `*` |
+| `comment` | No | v1 Andreani: `subMotivoDesc` when not `*` |
 
 API persiste en `PackageEvent.payload` + incluye en evento projector. Projector muestra en timeline de detalle (última milla).
 
-#### Gate terminal — `DELIVERED`
+#### Gate cierre — `DELIVERED` (único terminal v1)
 
 ```json
 {
@@ -281,24 +285,9 @@ API persiste en `PackageEvent.payload` + incluye en evento projector. Projector 
 }
 ```
 
-#### Gate terminal — `FAILED` (subset mapeos)
+#### `CANCELLED` (fuera scope v1 activo)
 
-```json
-{
-  "milestoneKey": "FAILED",
-  "emissionTrigger": "OOLL_DELIVERY_FAILED",
-  "stateChange": {
-    "canonicalStatus": "FAILED",
-    "subStatus": "Entrega fallida",
-    "lastOccurredAt": "<trigger>"
-  },
-  "deliveryFailureContext": { "reasonCode": "..." }
-}
-```
-
-#### Gate terminal — `CANCELLED`
-
-Andreani `Anulada` (automático) o cancelación manual declarativa. Solo post-gate listable.
+Andreani `Anulada` o cancel manual — código existe; no priorizado v1. Ver `plan.md` B.8.5 OUT OF SCOPE.
 
 ```json
 {
@@ -312,25 +301,50 @@ Andreani `Anulada` (automático) o cancelación manual declarativa. Solo post-ga
 }
 ```
 
-`cancellationContext` (motivo, actor): opcional v1 — no bloquea emisión.
+`cancellationContext` (motivo, actor): opcional — no bloquea emisión.
 
-### 4.4 Mapeo Andreani OOLL v1
+### 4.4 Andreani OOLL v1 — wire shapes and mapping
 
-Resolución por par estandarizado `(status, subStatus)` vía `CarrierStatusMapping`, no por raw carrier status aislado. Solo tramo **`LAST_MILE`**.
+Resolution uses standardized `(status, subStatus)` via `CarrierStatusMapping`. Lookup keys are built from **`evento`**, **`motivo`**, **`subMotivo` only** — description fields do not participate. Only **`LAST_MILE`** trail.
 
-| Andreani raw | Par canónico (`subStatus`) | Timestamp | Emite projector |
-|--------------|---------------------------|-----------|-----------------|
-| `Admision`, `AltaAutomatica`, `AltaInterna`, `AltaRemota`, `AsignacionACaja` | Recepcionado por OOLL | `pickedUpByCarrierAt` | Sí (incremental) |
-| `EnvioConsolidado` | En tránsito / Consolidado | `consolidatedAtCarrierAt` | Sí |
-| `Distribucion`, `EnvioDespachado` | En tránsito / En distribución | `inTransitAt` | Sí |
-| `GestionTelefonica` + códigos 50/51/… | Entrega fallida | — | Sí: macro `FAILED`, `deliveryFailureContext`; **sin** `milestoneKey` |
-| `GestionTelefonica` + códigos 50/51/… (mapeo terminal) | Entrega fallida | — | Sí + `milestoneKey: FAILED` (subset `CarrierStatusMapping` — B.8.4) |
-| `Anulada` | Anulada | — | Sí post-gate listable → `CANCELLED`; pre-gate persist only |
-| `GestionTelefonica` + código 99 | Entregada | `deliveredAt` | Sí + `DELIVERED` |
+**Production reference samples:** `andreaniEvents.md` (curated; not exhaustive).
 
-Intentos fallidos reintentables: sin timestamp nuevo; macro **`FAILED`**; incluir `deliveryFailureContext` si el raw trae motivo/comentario (`comment` opcional).
+**Timestamps:** `fechaHora` is the carrier business event time. Values with suffix **`Z`** are UTC (ISO 8601). API sets `occurredAt = new Date(fechaHora)`. Queue/broker ingest time (e.g. Redpanda) reflects pipeline latency, not business time.
 
-**Otros carriers (futuro):** mismo patrón — mapear status → timestamp operativo; decidir emisión incremental vs gate terminal.
+**Optional wire fields:** `idCliente` may be empty in production; stored in inbox `raw_payload` but **not used** for package MATCH (tracking id = `idAndreani`).
+
+#### Mapped families (catalog + prod samples)
+
+| `evento` (and codes) | Canonical `subStatus` | Timestamp / notes | Projects |
+|----------------------|----------------------|-------------------|----------|
+| `Admision`, `AltaAutomatica`, … | Recepcionado por OOLL | `pickedUpByCarrierAt` | Yes (incremental) |
+| `EnvioConsolidado` | En tránsito / Consolidado | `consolidatedAtCarrierAt` | Yes |
+| `Distribucion`, `EnvioDespachado` | En tránsito / En distribución | `inTransitAt` | Yes |
+| **`Visita`** + `motivo`/`subMotivo` (e.g. `26,22`) | Entrega fallida | — | Yes: macro `FAILED` + `deliveryFailureContext` |
+| **`GestionTelefonica`** + codes 50/51/… | Entrega fallida | — | Yes (same as above; common in E2E fixtures) |
+| **`EnvioEntregado`** (+ optional `motivo` 99) | Entregada | `deliveredAt` | Yes + `DELIVERED` |
+| `GestionTelefonica` + code 99 | Entregada | `deliveredAt` | Yes + `DELIVERED` |
+| `Anulada` | Anulada | — | B.8.3; out of active v1 scope |
+
+Retryable failures: no new operational timestamp; macro **`FAILED`**; include `deliveryFailureContext` when raw carries codes/descriptions.
+
+#### Unmapped / PROCESSED-only (v1 — by design)
+
+No `CarrierStatusMapping` match → inbox **`PROCESSED`**, no `package_events`, no projector emission. Examples from prod:
+
+| Wire shape | Why unmapped |
+|------------|--------------|
+| `ExpedicionHojaDeRutaDeViaje` | Operational route sheet; not in catalog |
+| `Visita` with **empty** `motivo`/`subMotivo` | No key `Visita` in catalog (only compound keys) |
+| `Visita` + free-text desc only (e.g. `"No responde llamado"`) | Desc fields not in lookup |
+
+#### Open analysis (debt — plan.md B.5.11)
+
+**`Visita` + `motivoDesc`/`subMotivoDesc` = `"Entregado"` without `motivo` 99:** semantically delivery, but lookup fails today. **Do not change mapping until** legacy TMS / Delivery Manager behavior is traced (how downstream interpreted this shape). Task owner: ops + API.
+
+**E2E/orchestrator note:** orchestrator + projector seeders cover **`Visita`** (coded failure), **`EnvioEntregado`** (delivery), **`GestionTelefonica`** (multi-failure B.5.9), and unmapped noise (**B.5.10** ✅). **B.5.11** (`Visita` + text-only `"Entregado"`) remains unmapped by design until legacy analysis.
+
+**Other carriers (future):** same pattern — map status → operational timestamp; decide incremental vs terminal gate.
 
 ---
 
@@ -344,10 +358,8 @@ Intentos fallidos reintentables: sin timestamp nuevo; macro **`FAILED`**; inclui
 | 1 | `OE_LAUNCH` | **Sí** (bootstrap) | `WAREHOUSE_RECEIVED` | `oeLaunchAt` |
 | 2 | `CONTAINER_PACKAGES_SHIPPED` | **Sí** | `LAST_MILE_DISPATCHED` | `dispatchedAt` |
 | 3 | OOLL checkpoints | **Sí** (obligatorio) | — (progreso / macro `IN_TRANSIT`) | timestamps según matriz |
-| 3b | OOLL entrega fallida reintentable | **Sí** | — (macro `FAILED`, sin milestone) | `deliveryFailureContext` |
-| 3c | OOLL entrega fallida terminal | **Sí** | `FAILED` | subset mapeos (B.8.4) |
+| 3b | OOLL entrega fallida | **Sí** | — (macro `FAILED`, sin milestone) | `deliveryFailureContext` |
 | 4 | OOLL entregada | **Sí** | `DELIVERED` | `deliveredAt` |
-| 5 | Cancel / Andreani `Anulada` | **Sí** post-gate listable | `CANCELLED` | pre-gate: persist only |
 
 **Watermark de proyección (B.2):** ver §5.1. Emisión = gate satisfecho ∧ delta vs watermark ∧ identidad proyectable.
 
@@ -363,8 +375,9 @@ Intentos fallidos reintentables: sin timestamp nuevo; macro **`FAILED`**; inclui
 |-------|-----|
 | `lastMilestoneKey` | Último `MilestoneKey` incluido en una emisión |
 | `projectedTimestamps` | JSON `{ readyToCollectAt: "…", oeLaunchAt: "…" }` — keys ya enviadas en `milestoneDeltas` / `operationalTimestamps` |
-| `lastProjectedCanonicalStatus` / `lastProjectedSubStatus` | Último `stateChange` proyectado (OOLL sin avance de `MilestoneKey`) |
-| `lastProjectedAt` | Timestamp del trigger de la última emisión reclamada |
+| `lastProjectedCanonicalStatus` / `lastProjectedSubStatus` | Last projected `stateChange` (OOLL without `MilestoneKey` advance) |
+| `lastProjectedFailureReasonCode` / `lastProjectedFailureReasonLabel` / `lastProjectedFailureComment` | Last projected `deliveryFailureContext` fingerprint (B.5.9) |
+| `lastProjectedAt` | Timestamp of the last claimed emission trigger |
 
 **Dos responsabilidades (no mezclar):**
 
@@ -415,10 +428,10 @@ FenixOutboxProducer (activación outbox)
 
 **Dónde sí es obligatorio el watermark:**
 
-- Delta multi-campo en bootstrap (`journeyAnnouncedAt` en chunk + `oeLaunchAt` en gate) y gates en orden no feliz.
-- OOLL (B.5): emisiones incrementales con mismo `MilestoneKey`, cambios de `subStatus`, entrega fallida sin nuevo `*At`.
+- Delta multi-field bootstrap and out-of-order gates.
+- OOLL (B.5): incremental emissions with same `MilestoneKey`, `subStatus` changes, **repeat delivery failures** with same macro/subStatus but different `deliveryFailureContext` (B.5.9 fingerprint on watermark failure fields).
 
-**Cohortes masivas:** watermark/outbox bulk en `publishManyEventsBulk` ✅; relay Fenix bulk secuencial → **`plan.md` § B.7** (B.7.1 ✅; B.7.2 pending).
+**Cohortes masivas:** watermark/outbox bulk en `publishManyEventsBulk` ✅; relay Fenix bulk → **`plan.md` § B.7** ✅.
 
 ---
 
@@ -430,15 +443,10 @@ Desvíos abiertos (2026-06-24):
 
 | Tema | Acción |
 |------|--------|
-| Fenix bulk relay API | B.7 — `plan.md` § B.7 |
-| E2E local API → projector | B.6 — `local-testing-guide.md` |
-| Cancel manual API | B.8.5 |
+| Pendiente implementación | **`plan.md` § Pendiente** |
 | `collectedAt` consumer primera milla | TBD |
-| Catálogo milestones DB | C.2 persistencia (HTTP ✅) |
-| Search index + list `q`/filtros | **DONE (C.5 + C.6)** · perf → `search-performance-spec.md` SP.1 |
-| Tramo en `PackageEvent.shipmentId` | **C.4** — `blocks-projector.md` Block 6 |
 
-El resto del camino warehouse + OOLL MVP v1 está alineado con este doc (ver evidencia en `plan.md` Ground Truth).
+El resto del camino warehouse + OOLL MVP v1 está alineado con este doc (ver evidencia reproducible en `plan.md` § Validation evidence).
 
 ---
 
@@ -449,8 +457,9 @@ El resto del camino warehouse + OOLL MVP v1 está alineado con este doc (ver evi
 | Plan operativo + status | **`plan.md`** |
 | Onboarding | `prompt.md` |
 | E2E local | `local-testing-guide.md` |
+| Andreani prod wire samples | `andreaniEvents.md` |
 | Fenix bulk relay | `plan.md` § B.7 |
-| Terminales FAILED / CANCELLED | `plan.md` § B.8 |
+| Terminales última milla | `plan.md` § B.8 · §2.1 |
 | Blocks API | `blocks-api.md` |
 | Blocks projector | `blocks-projector.md` |
 | Flujo negocio | `logistics.md` |

@@ -1,28 +1,28 @@
 # Building Blocks: shipments-history-projector — Design Spec
 
-> **Status de implementación:** ver **`plan.md`** Fase C. Este archivo es **spec de diseño**; marcadores Status/DONE/PARTIAL en blocks pueden estar desactualizados.
+> **Implementation status:** see **`plan.md` only**. This file is design spec — no inline DONE/PENDING markers.
 
 ## Overview
 
-**Definiciones de dominio:** ver **`domain-model.md`** (milestones, tramos, estados, gates).
+**Domain definitions:** **`domain-model.md`** (milestones, tramos, states, gates).
 
-Projector schema + modules alineados a modelo package-centric. Spec de proyección, catálogos, search y list/detail — ver blocks abajo.
+Projector schema + modules aligned to package-centric model. Projection, catalogs, search, list/detail — blocks below.
 
-**Rol del projector:** consume eventos con `milestoneKey` + `operationalTimestamps`, materializa read models, mantiene `delivery_history_search_index`, sirve listado con `current_milestone` (`MilestoneKey`) y detalle con `segments[]` por tramo.
+**Projector role:** consume events with `milestoneKey` + `operationalTimestamps`, materialize read models, maintain `delivery_history_search_index`, serve list with `current_milestone` (`MilestoneKey`) and detail with `segments[]` per trail.
 
 ---
 
 ## Blocks (design spec)
 
-Índice — detalle por block abajo. **Qué está hecho:** `plan.md` Ground Truth + Fase C.
+Index — detail per block below. **What is done:** `plan.md` § Done + § Pending.
 
-| Block | Tema |
-|-------|------|
-| 1–5 | Schema, DTOs, mocks, módulos |
+| Block | Topic |
+|-------|-------|
+| 1–5 | Schema, DTOs, mocks, modules |
 | 6 | Ingestor `PACKAGE_NEW_MILESTONE` |
 | 7–8 | List/detail derivation |
 | 9–10 | External scenarios, retire mocks |
-| 11 | Search index |
+| 11 | Search index + list read path |
 | 12 | Filter catalogs + milestones |
 | 13 | Partitioning (deferred) |
 
@@ -46,7 +46,7 @@ DTOs:
 - `GetShipmentDetailOutputDto` **v1**: detalle operativo (packages, segments, milestones, items, timeline, summary)
 - `GetShipmentDetailOutputDto` **v2** (spec): contrato de **datos normalizados** para que el frontend arme `ShipmentDetailViewModel` vía adapter — ver Block 8 §8.1
 
-**Validación:** DTOs v1 validados con Zod. Lista alineada a grilla mock. Detalle v1 cubre núcleo operativo; gap vs backoffice → Block 8 §8.1 (spec cerrada 2026-06-25), implementación **Block R2**.
+**Validation:** DTO v2 spec (**Block R2**). List + detail HTTP contracts defined. Gap `segments[]` (FIRST_MILE not projected): **C.4** — `plan.md`.
 
 ---
 
@@ -224,7 +224,7 @@ Arquitectura:
 - Chunk buffer (si API particiona payload)
 - Search **performance** P1 (`search-performance-spec.md`) — lectura optimizada, no contrato HTTP
 
-**Próximo paso:** C.4 tramo · C.2 persistencia catálogo · SP.1 performance.
+**Next focus (see `plan.md`):** C.4 trail-aware projection · C.2 milestone catalog persistence · SP.1 benchmark gate @ 250k.
 
 ---
 
@@ -271,22 +271,18 @@ Arquitectura:
 - La reconciliación comercial (orden, delivery, direcciones, ítems enriquecidos) es contexto opcional en la vista, no el eje de presentación.
 - Si frontend necesita agrupar packages relacionados en una vista superior, es responsabilidad de presentación; projector expone packages como entidades propias.
 
-**Qué existe (v1):**
-- `getShipmentDetail` use case
-- Query fetches: packages[] (con items + events + milestones) + shipments[]
-- Output mapea a: summary (totalPackages, totalItems, totalWeightGrams), segments[], packages[], timeline per package
-- Archivos: `getShipmentDetail.dto.ts`, `getShipmentDetail.useCase.ts` (mapeo HTTP en métodos privados), `deliveryHistoryView.repository.ts` + `deliveryHistoryView.repository.mapper.ts` (`toDetail`, derivados persistidos p.ej. `volumeCubicCm`)
+**Qué existe (v2 — Block R2 ✅):**
+- `GetShipmentDetailOutputDto` v2 — Block 8 §8.1
+- `getShipmentDetail` use case + repository `findDetailById`
+- `packages[]` timeline/milestones; `segments[]` desde `delivery_history_view_shipments` (hoy ≈1 en path real — ver C.4)
+- `logistics` / `shipmentInfo` vacíos intencionales (comercial pendiente)
 
-**Qué falta (composición + contrato v2):**
-- Implementar `GetShipmentDetailOutputDto` v2 (Block 8 §8.1)
-- Validación: permitir detalle aunque shipments vacío (casos externos only-package)
-- Fallback: si primaryShipment null, usar first shipment en relación
-- Aggregation logic: si múltiples shipments → ordenar segments[] cronológicamente por tramo
-- ETD derivation: si primaryShipment null, usar package milestone (estimated via carrier)
-- Lookup alternativo por `displayId` o tracking vía search index (Block 11) además de UUID canónico
-- Navegación lista→detalle: `ListShipmentsResultItem.id` **debe** ser el UUID de `DeliveryHistoryView` (no `displayId` / `shipmentId` visible)
+**Qué falta:**
+- **C.4** — tramo activo en `PackageEvent.shipmentId` + proyectar `FIRST_MILE` en `segments[]`
+- Lookup por `displayId`/tracking vía search index (opcional)
+- Block 9 casos externos only-package
 
-**Próximo paso:** Block R2 (evolución DTO detalle); luego casos externos (Block 9).
+**Próximo paso:** C.4 · Block 9.
 
 ---
 
@@ -602,12 +598,13 @@ GET /delivery-history/shipments?q=&courier=&deliveryType=&milestone=&limit=&offs
 
 **Lectura — flujo unificado con y sin `q`:**
 
-| Escenario | Query plan |
-|-----------|------------|
-| Sin `q`, sin filtros | `WHERE is_listable ORDER BY updated_at DESC` (hoy) |
-| Sin `q`, con filtros | Filtros sobre `delivery_history_views` + partial indexes |
-| Con `q` (válido, ver guardrails) | Prefix scan: `field_value LIKE normalize(q) \|\| '%'` en `search_index` → join/intersect en `delivery_history_views` |
-| Con `q` + filtros | Intersección: matches del índice ∩ `courier` / `deliveryType` / `current_milestone` |
+| Scenario | Query plan |
+|----------|------------|
+| No `q`, no filters | `WHERE is_listable ORDER BY updated_at DESC` |
+| No `q`, with filters | Filters on `delivery_history_views` + partial indexes (P1.1) |
+| With `q` (valid) | Single query: prefix subquery + `COUNT(*) OVER()` + minimal row select (P1.2) |
+| With `q` + filters | Intersection: index matches ∩ filters on view |
+| No `q` (list page) | Prisma minimal `select` on `delivery_history_views` (P1.3) |
 
 **Semántica de respuesta paginada (con y sin `q`):**
 
@@ -643,7 +640,7 @@ GET /delivery-history/shipments?q=&courier=&deliveryType=&milestone=&limit=&offs
 
 **Contrato frontend — `backoffice-shipments-zone` / SXP (wiring con `ShipmentList`):**
 
-Spec dedicada: **`backoffice-list-search-integration.md`**. El DS (`@fravega-it/logistic-ds`) ya expone barra de búsqueda y filtros vía `filters` + `onFiltersChange`; el cableado a API es responsabilidad del zone (backend C.5/C.6 ✅).
+**Contrato frontend:** list `q` + filtros en `GET /delivery-history/shipments` — backend C.5/C.6 ✅. Wiring FE entregado a equipo backoffice (fuera repo).
 
 | Práctica | Regla MVP | Motivo |
 |----------|-----------|--------|
@@ -699,8 +696,6 @@ Spec dedicada: **`backoffice-list-search-integration.md`**. El DS (`@fravega-it/
 
 **Qué falta:**
 - Tabla `milestones` + seeder DB (C.2 persistencia)
-- Validación query `milestone` en list contra catálogo (opcional endurecimiento)
-- Wiring FE: `onFiltersChange` → API — spec **`backoffice-list-search-integration.md`**
 
 ---
 
@@ -796,20 +791,18 @@ Gancho existente: `deliveryLink` en gates API (`consumeOeLaunch`, dispatch, Andr
 
 **Dependencias:** Block 11 opcional para lookup `displayId`; R2 puede shippear con UUID-only.
 
-**Status:** **DONE** (implementación 2026-06-25). Validar local: `MOCKS_ENABLED=true` → `GET /delivery-history/shipments` → `GET /delivery-history/shipments/:id`.
+**Block R2 (detail v2):** spec implemented — validate locally with `MOCKS_ENABLED=true` → list → detail.
 
 ---
 
 ## Execution Priority
 
-**Actualizado 2026-06-25.** Status detallado: `plan.md`. Onboarding + handoff search: `prompt.md`.
+**See `plan.md` § Pending for current status.** Onboarding: `prompt.md`.
 
-1. **SP.1** — search performance P1 (`search-performance-spec.md`) — query única prefix, índices parciales, select mínimo sin `q`
-2. **C.4** — `PackageEvent.shipmentId` = active trail en proyección
-3. **C.2** persistencia catálogo `milestones` (HTTP ✅)
-4. Block 13 particionado search/inbox (post-MVP)
-
-**Completado recientemente:** **C.5 + C.6 search** · B.7.2 bulk relay · B.6 orchestrator E2E · Block R2 detalle v2 · C.7 terminales 5 keys.
+1. **SP.1 benchmark** — archive Artillery gate @ 250k (`search-performance-spec.md`)
+2. **C.4** — `PackageEvent.shipmentId` = active trail on projection
+3. **C.2** — persist `milestones` catalog table (HTTP endpoint exists)
+4. **Block 13** — search/inbox partitioning (post-MVP)
 
 ---
 
@@ -845,13 +838,11 @@ Gancho existente: `deliveryLink` en gates API (`consumeOeLaunch`, dispatch, Andr
 
 ## Known Constraints
 
-- Migration `current_milestone` ✅ C.1; lógica terminales 5 keys ✅ **C.7**
-- Particionado explícitamente **fuera de scope** hasta post-MVP (Block 13)
-- **Search funcional ✅ C.5 + C.6:** índice en tx de proyección; list `q` + filtros en `GET /delivery-history/shipments`; mocks decorator alineado
-- Search **performance** pendiente — `search-performance-spec.md` (SP.1); denormalización/particionado → P2 / Block 13
-- Catálogos HTTP: `logistics_operators`, `operation_types`, milestones (static/mock)
-- Spec search cerrada (HTTP `q` unificado, guardrails FE/BE, paginación filtrada) — Block 11; integración FE → `backoffice-list-search-integration.md`
-- API → projector E2E no validado en entorno integrado (replay outbox pendiente — Block 10)
-- Mocks static from `__mocks__/deliveryHistory/*.json` (lint ruidoso en registry generado)
-- Frontend: detalle v2 (**Block R2** ✅) + list search spec; wiring FE pendiente
-- Warehouse-centric schema ready; external-only cases need validation (Block 9)
+- Partitioning explicitly **out of scope** until post-MVP (Block 13)
+- **Search (C.5 + C.6):** index in projection tx; list `q` + filters on `GET /delivery-history/shipments`
+- **Search perf (SP.1):** P1.1–P1.3 coded — see `search-performance-spec.md`; P2 / Block 13 deferred
+- Catalog HTTP: `logistics_operators`, `operation_types`, milestones (static until C.2)
+- Search HTTP contract closed — Block 11
+- Mocks static from `__mocks__/deliveryHistory/generated` (regenerate via `npm run mocks:generate:delivery-history`)
+- Frontend: detail v2 (**Block R2**) + list search spec; FE wiring out of repo
+- Warehouse-centric schema; external-only cases need validation (Block 9)

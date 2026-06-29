@@ -15,6 +15,8 @@ Do not modify the per-project files. Use this workspace file as the source of tr
 - `<projectRoot>/framework` — never modify in either project
 - `shipments-history-api/AGENTS.md` and `shipments-history-projector/AGENTS.md` — leave unchanged
 
+**Runtime (agents):** do not start services or run build/test/lint/orchestrator — see **`prompt.md` § Runtime and MCP**. Status: **`plan.md` § Pending**. Evidence rules: **`plan.md` § Validation evidence**.
+
 ---
 
 ## DEVELOPMENT STANDARDS

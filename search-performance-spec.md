@@ -1,6 +1,6 @@
 # Search performance — spec tentativa (bajo esfuerzo / alto impacto)
 
-**Estado:** TENTATIVE — 2026-06-25  
+**Estado:** TENTATIVE — 2026-06-26  
 **Alcance:** `shipments-history-projector` — lectura de `GET /delivery-history/shipments`  
 **Prerequisito funcional:** C.5 + C.6 **DONE** (`plan.md`) — contrato HTTP y población de índice cerrados; este doc cubre **solo optimización de lectura**.  
 **Referencias:** `rfc2.md` §7.3, `blocks-projector.md` Block 11, benchmarks Artillery (`testing-orchestrator/runs/`)
@@ -52,19 +52,19 @@ Estos invariantes son **obligatorios** para cualquier cambio de esta spec:
 
 ## 3. Diagnóstico (causa raíz)
 
-### 3.1 Query actual (con `q`)
+### 3.1 Diagnosis (pre-P1.2 baseline — historical)
 
-`DeliveryHistorySearchRepository.searchListableWithPrefix` ejecuta:
+**Before P1.2**, `DeliveryHistorySearchRepository.searchListableWithPrefix` executed three round-trips:
 
 1. `SELECT id` con subquery `DISTINCT view_id` + join + filtros + `ORDER BY` + `LIMIT/OFFSET`
 2. `SELECT COUNT(*)` con la **misma** subquery (sin `LIMIT`)
 3. `findMany` por ids con `include` de `primaryPackage` y `primaryShipment` + reorden en memoria
 
-**Costo dominante en stress 95k:** paso 2 (count exacto) y paso 1 cuando el prefix matchea muchas filas (`EP000`, `3600029906`).
+**Post-P1.2 (current):** single SQL with `COUNT(*) OVER()` + minimal row mapping via `toDomainFromListRow` — see §9 checklist.
 
-### 3.2 Índices faltantes
+### 3.2 Missing indexes (resolved P1.1)
 
-`blocks-projector.md` Block 11 define partial indexes sobre `delivery_history_views` para filtros sin `q`. **No están en la migration inicial.**
+`blocks-projector.md` Block 11 defines partial indexes on `delivery_history_views`. **Implemented:** migration `20260626140000_add_listable_view_partial_indexes`.
 
 ### 3.3 Hidratación innecesaria
 
@@ -203,14 +203,14 @@ Criterio: prefix selectivo debe usar `Index Scan` o `Bitmap Index Scan` sobre `i
 
 ## 6. Phase 2 — backlog (mayor esfuerzo, evaluar post Phase 1)
 
-Solo si Phase 1 no alcanza metas con seed 450k:
+Solo si Phase 1 no alcanza metas con seed 250k:
 
 | ID | Cambio | Impacto | Notas |
 |----|--------|---------|-------|
 | P2.1 | Columnas denormalizadas en `search_index` (`view_updated_at`, `is_listable`, filtros) + índice `(field_value pattern_ops, view_updated_at DESC)` | Muy alto en broad prefix | Migration + mapper de proyección |
 | P2.2 | Indexar EP + last-mile como filas `TRACKING` distintas cuando coexisten | Medio | Caso marketplace RFC2 §2.1 |
 | P2.3 | Keyset pagination (`updated_at`, `id`) | Alto en offset grande | Requiere acuerdo FE |
-| P2.4 | Block 13: particionado + TTL de `search_index` | Alto a 450k+ | Post estabilización modelo |
+| P2.4 | Block 13: partitioning + TTL of `search_index` | High at 250k+ | Post model stabilization |
 
 ---
 
@@ -219,9 +219,11 @@ Solo si Phase 1 no alcanza metas con seed 450k:
 ### 7.1 Automatizada (existente)
 
 ```bash
-# Pre-requisitos: seed ≥ 95k, MOCKS_ENABLED=false, projector en :9200
+# Prerequisites: migrate projector (P1.1 indexes), seed ≥ 250k, MOCKS_ENABLED=false, projector :9200
 cd testing-orchestrator
-npm run search-load
+npm run search-load        # gate = smoke + realistic (~3 min)
+# npm run search-load:smoke   # ~45s quick check
+# npm run validate            # e2e then search gate
 ```
 
 Comparar `artillery/summary.json` entre runs antes/después en la **misma máquina** y mismo `seedCount`.
@@ -249,19 +251,18 @@ Comparar `artillery/summary.json` entre runs antes/después en la **misma máqui
 |--------|------------|
 | `COUNT(*) OVER()` en broad prefix sigue siendo O(n) | Phase 1 aún elimina un pass completo; P2.1 si no alcanza |
 | `parcel` ≠ `display_id` en datos reales futuros | Mantener fallback a `primaryPackage.externalId` en mapper si `display_id` null |
-| Migration de índices en tabla grande (450k) | `CREATE INDEX CONCURRENTLY` en prod; migration dev puede ser blocking |
+| Migration on large table (250k) | `CREATE INDEX CONCURRENTLY` in prod; dev migration may block |
 | Bimodalidad por pool Postgres saturado | Documentar `max_connections` / pool Prisma; no confundir con query lento |
 
 ---
 
 ## 9. Checklist de implementación
 
-- [ ] **P1.1** Migration partial indexes + `schema.prisma`
-- [ ] **P1.2** Refactor `searchListableWithPrefix` → query única + mapper list row
-- [ ] **P1.3** Refactor `searchListableWithoutPrefix` → `select` mínimo
+- [x] **P1.1** Migration partial indexes + `schema.prisma`
+- [x] **P1.2** Refactor `searchListableWithPrefix` → query única + mapper list row
+- [x] **P1.3** Refactor `searchListableWithoutPrefix` → `select` mínimo
 - [ ] **P1.4** Documentar `EXPLAIN` de referencia
-- [ ] Re-ejecutar `npm run search-load` con seed 95k y archivar summary
-- [ ] (Opcional) Re-ejecutar con seed 250k/450k cuando esté disponible
+- [ ] Re-ejecutar `npm run search-load` con seed 250k y archivar summary
 
 ---
 

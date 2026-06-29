@@ -1,10 +1,10 @@
 # Building Blocks: shipments-history-api — Event Emission for Projector
 
-> **Status de implementación:** ver **`plan.md`** únicamente. Este archivo es **spec de diseño**; líneas `Status:` / DONE / PROPOSED dentro de cada block pueden estar desactualizadas.
+> **Implementation status:** see **`plan.md` only**. This file is design spec — no inline DONE/PENDING markers.
 
 ## Overview
 
-**Definiciones de dominio (milestones, tramos, estados, gates):** ver **`domain-model.md`** (autoridad). Este archivo detalla blocks de implementación API.
+**Domain definitions (milestones, tramos, states, gates):** **`domain-model.md`** (authority). This file details API implementation blocks.
 
 API reconcilia eventos de múltiples fuentes (inbox estandarizado de TMS, webhooks de carriers, etc.). Opera en **dos capas**:
 
@@ -312,7 +312,7 @@ API persiste timestamps operativos antes de emitir. La emisión obedece **gates*
 | 4 | OOLL entregada | `DELIVERED` | Sí | Terminal v1 |
 | — | Block 2 / Block 3 chunk | — | **No** | Persist only |
 
-**Watermark de proyección (B.2):** tabla `package_projection_watermarks` (schema ✅). **B.2.2 DONE:** repo + `PackageProjectionDeltaService`. **B.2.3–B.2.4 pending:** lectura en gate use case; claim (`claimBulk`) en `FenixOutboxProducer` tx con outbox `PENDING` — activado **post-return** por `EventPublisherInterceptor`. Detalle: `domain-model.md` §5.1.
+**Projection watermark (B.2):** see `domain-model.md` §5.1 · `plan.md` B.2.
 
 **Cohorte warehouse:** `OE_LAUNCH` por `entryOrderExternalId` = `Journey.externalId`. Emisión per-package; `metadata.projectionBootstrap: true` en gate 1. Replay del mismo gate: `appliedPackageIds` + set-once (`oe_launch_at` / `dispatched_at`) evita re-emisión sin depender solo del watermark.
 
@@ -430,12 +430,7 @@ PackageEvent {
 
 **Regla de idempotencia:** (packageId, source, externalEventId) UNIQUE → rechaza duplicados sin error.
 
-**Qué falta en Block 2 (vs definición `domain-model.md`):**
-- ~~Crear `Shipment FIRST_MILE` + `PackageShipment`~~ **DONE** (`ShipmentRepository`, ep-ready use case)
-- Idempotencia EP tracking duplicado
-- Proyección: **no** en Block 2; primer gate = `OE_LAUNCH`
-
-**Próximo paso:** Block 3 — WMI anuncia viaje LPC; loop Fenix reconcilia `EP...N` draft → `EP...N-0x` canónico (persistencia API; proyección en Block 6.3).
+**Implementado:** `Shipment FIRST_MILE` + `PackageShipment` en ep-ready. Proyección: primer gate = `OE_LAUNCH`.
 
 ---
 
@@ -777,7 +772,7 @@ Metadata SPU (`itemType`, `pickupStoreId`, `discoveryGaps`) viaja en el **bootst
 - Primer emisión de canónico `EP...N-0x` = gate **OE_LAUNCH** con batch de dos milestones.
 - v1 no requiere evento alias draft→canónico en projector.
 
-**Próximo paso:** Block 4 (outbox + relay) + Block 6.3 (`ConsumeOeLaunchUseCase`) + consumer projector `PACKAGE_NEW_MILESTONE`.
+**Implementado:** chunk WMI + reconcile; proyección en gate OE_LAUNCH. See `plan.md`.
 
 ---
 
@@ -857,15 +852,7 @@ OutboxEvent {
 }
 ```
 
-**Watermark API (B.2 — diseño cerrado; B.2.2 coded):**
-
-| Subtask | Ubicación | Status |
-|---------|-----------|--------|
-| B.2.2 Repo | `repositories/packageProjectionWatermark/` | **DONE** |
-| B.2.2b Delta service | `application/packageProjectionWatermark/packageProjectionDelta.service.ts` | **DONE** |
-| B.2.3 Gate integration | `consumeOeLaunch`, `consumeWmsContainerPackagesShipped`, `consumeAndreaniEvents` | **DONE** |
-| B.2.4 Producer claim | `framework/.../fenix.outbox.producer.ts` | **DONE** |
-| B.7 Fenix bulk relay | `fenix.outbox.producer.ts` → chunks secuenciales → `produceBulk` | **DONE (core)** — B.7.4 docs pending; E2E `warehouse` `2026-06-25T16-59-55-015Z` (`plan.md` § B.7) |
+**Watermark API (B.2 — design closed):** see `plan.md` B.2 for file locations and status.
 
 **Gate use case (pre-return):**
 1. Persist operativo (como hoy).
@@ -876,7 +863,7 @@ OutboxEvent {
 
 **`FenixOutboxProducer` (activación outbox):**
 1. `BEGIN TX` → bulk upsert `package_projection_watermarks` (claim desde payload) + `createManyAndReturn` `outbox_ingestor` `PENDING`.
-2. `COMMIT` → relay Fenix: cohort LPC vía **`POST /api/event/bulk`** en chunks N secuenciales (**B.7.2** ✅); retries con `eventId` → `/api/event` single.
+2. `COMMIT` → relay Fenix: LPC cohort via **`POST /api/event/bulk`** sequential chunks (B.7); retries with `eventId` → single `/api/event`.
 3. Reintentos con `event.payload.eventId` → relay sequential `/api/event` sin re-claim (path existente).
 
 **Anti-dup:** warehouse — `appliedPackageIds` + set-once; multi-gate/OOLL — watermark; entrega — outbox; projector — `externalEventId` determinístico.
@@ -895,12 +882,7 @@ Proceso separado que:
 
 **API (mismo topic):** consume `JOURNEY_RECONCILIATION` vía handler dedicado; no procesa sus propios `PACKAGE_NEW_MILESTONE` salvo que se defina relay inverso (no v1).
 
-**Qué falta en Block 4:**
-- Decidir frecuencia de batching (cada evento inmediatamente, o batch por tiempo/tamaño)
-- Retry logic en relay (DLQ si Fenix no responde)
-- Feature flag para apagar relay en desarrollo
-
-**Próximo paso:** Projector consume evento del topic y proyecta.
+**Outbox path:** watermark claim + Fenix relay (+ bulk B.7). Projector consumes `PACKAGE_NEW_MILESTONE`. See `plan.md`.
 
 ---
 
@@ -965,9 +947,9 @@ Regla:
   - `comment` — opcional; **persistir solo si llega** (texto libre del operador)
 - Andreani `GestionTelefonica 50/51` entra en esta categoría por defecto.
 - solo aplica con package en tramo `LAST_MILE` (post-`oeLaunchAt`).
-- entrega exitosa posterior sigue abriendo `deliveredAt` + `MilestoneKey: DELIVERED` (macro `DELIVERED` reemplaza macro `FAILED`).
+- entrega exitosa posterior → `deliveredAt` + `milestoneKey: DELIVERED` (único cierre v1).
 
-**Terminales (fase 2 B.8.4):** subset de mapeos `Entrega fallida` marcados en `CarrierStatusMapping` → además `milestoneKey: FAILED`.
+**Nota v1:** `FAILED` **no** es terminal — no usar `milestoneKey: FAILED`. Infra B.8.4 existe; fuera de scope.
 
 ### 5.5 Condición exacta de emisión a outbox
 
@@ -983,14 +965,11 @@ API emite `PACKAGE_NEW_MILESTONE` al projector cuando:
 | Modo | Cuándo | `MilestoneKey` | Payload |
 |------|--------|----------------|---------|
 | Checkpoint | Admisión, consolidación, distribución | — | `operationalTimestamps` + `stateChange` (`IN_TRANSIT`) |
-| Entrega fallida reintentable | `Entrega fallida` | — | macro `FAILED` + `stateChange` + `deliveryFailureContext` |
-| Entrega fallida terminal | `Entrega fallida` (mapeo) | `FAILED` | idem + `milestoneKey` |
-| Entregada | `Entregada` | `DELIVERED` | `deliveredAt` + `stateChange` |
-| Cancel / Anulada | `Anulada` post-gate listable | `CANCELLED` | `stateChange` (`CANCELLED`) |
+| Entrega fallida | `Entrega fallida` | — | macro `FAILED` + `deliveryFailureContext` (proyecta; no terminal) |
+| Entregada | `Entregada` | `DELIVERED` | `deliveredAt` + cierre ciclo |
+| Cancel / Anulada | Manual / carrier | `CANCELLED` | fuera scope v1 activo |
 
-**Regla general:** si OOLL cambia `subStatus` y/o timestamp respecto al último valor proyectado → **emitir** (si post-gate listable). Macro `IN_TRANSIT` en checkpoints; `FAILED` en fallo reintentable; `DELIVERED` / `CANCELLED` en cierres.
-
-Casos v1 sin emisión projector (persist API only): `Anulada` **pre-gate listable**, `Suspendida`, `En devolución` — ver `domain-model.md` §4.3.
+**Regla general:** OOLL relevante → **emitir** si post-gate listable. Único cierre v1: `DELIVERED`.
 
 ### 5.6 Payload hacia projector
 
@@ -1003,20 +982,24 @@ Para eventos OOLL v1:
 
 Ejemplos:
 - `Recepcionado por OOLL` → `IN_TRANSIT` + `pickedUpByCarrierAt`.
-- `Entrega fallida` reintentable → `FAILED` + `subStatus` + `deliveryFailureContext` (sin `MilestoneKey`).
-- `Entrega fallida` terminal → `FAILED` macro + `milestoneKey: FAILED`.
-- `Anulada` post-gate → `CANCELLED` macro + milestone.
+- `Entrega fallida` → macro `FAILED` + `deliveryFailureContext` (sin `milestoneKey`).
 - `Entregada` → `DELIVERED` + `deliveredAt` + `milestoneKey: DELIVERED`.
+
+**Andreani wire (production — see `andreaniEvents.md`, `domain-model.md` §4.4):**
+
+- Lookup keys: `evento`, `motivo`, `subMotivo` only — not description fields.
+- `fechaHora` with `Z` = UTC business time → API `occurredAt`.
+- `idCliente` optional (often empty); persisted in inbox; MATCH by `idAndreani` only.
+- Common `evento` values: `Visita`, `EnvioEntregado`, `GestionTelefonica`, `Distribucion`, … — E2E/orchestrator + seeders aligned per **plan.md B.5.10**; B.5.11 text-only `Visita` Entregado still out of scope.
+- Unmapped events (e.g. `ExpedicionHojaDeRutaDeViaje`) → inbox `PROCESSED`, no projection.
 
 ### 5.7 Alcance explícito de v1
 
-- No existe timestamp `failedDeliveryAt`; entrega fallida reintentable usa macro `FAILED` sin `MilestoneKey`.
-- Fallo terminal: `milestoneKey: FAILED` solo en mapeos marcados (B.8.4).
-- **Sí** existe proyección projector para entrega fallida (`stateChange` + `deliveryFailureContext`).
-- `Próximo arribo` y similares: emitir si cambia `subStatus` proyectado (sin timestamp).
-- `Anulada`: `CANCELLED` automático post-gate listable; pre-gate persist only.
+- Entrega fallida: macro `FAILED` proyecta; **no** `milestoneKey: FAILED`.
+- Único terminal activo: `DELIVERED`. `CANCELLED` manual — fuera scope v1.
+- **Sí** proyección projector para entrega fallida (`stateChange` + `deliveryFailureContext`).
 - `Suspendida`, `Cambios en la entrega`, `En devolución`: persist API; emisión projector diferida.
-- Cancel manual declarativo: gate B.8.5 (sin mapeo carrier aún).
+- Cancel manual (B.8.5): **OUT OF SCOPE** v1.
 
 ### 5.8 Resolución de package y política UNMATCHED (FINAL — 2026-06-23)
 
@@ -1064,12 +1047,10 @@ Cuando hay MATCH, en **una transacción**:
    - `PackageMilestones` (`set-once` / `max` según campo),
    - `Package` / `Shipment` (`canonicalStatus`, `subStatus`),
    - `PackageEvent` append-only (`source = ANDREANI`, `eventName` derivado del raw).
-4. Si aplica emisión (§5.5): construir `PACKAGE_NEW_MILESTONE` incremental, `return { event }` → interceptor → outbox (watermark filtro **B.2.3**).
-5. Marcar inbox `PROCESSED` + `processed_at`.
+4. If emission applies (§5.5): build incremental `PACKAGE_NEW_MILESTONE`, `return { event }` → interceptor → outbox (watermark filter — see `plan.md` B.2).
+5. Mark inbox `PROCESSED` + `processed_at`.
 
-**Estado código (2026-06-23):** §5.8.1–5.8.4 coded en API. `ConsumeAndreaniEventsUseCase` orquesta; persistencia en `repositories/andreani/` (`IAndreaniRepository`: inbox, match, apply, projection read). Emisión `{ event }` → outbox vía interceptor. **Fixes:** seeder compound keys; contrato `milestoneDeltas` API↔projector. **Pendiente B.2.3:** filtro delta vs `package_projection_watermarks` antes de emitir (repo + delta service **B.2.2** ✅).
-
-**Alcance:** solo el **evento actual**; no consultar ni re-aplicar UNMATCHED históricos del mismo `idAndreani`.
+**Scope:** current event only; do not re-apply historical UNMATCHED for the same `idAndreani`.
 
 Casos sin emisión projector pero con persist API (matriz §5.3 “no”): inbox `PROCESSED`, sin `{ event }`.
 
@@ -1086,7 +1067,7 @@ Cuando **no** hay MATCH:
 | Mutar `packages` / milestones / outbox | **No** |
 | Respuesta HTTP consumer | **200** con `{ id, status: 'UNMATCHED' }` — no es fallo retryable |
 
-**Índice (migration incremental `20260623120000_add_inbox_andreani_unmatched_index`):**
+**Índice (migration incremental `20260626100000_add_inbox_andreani_unmatched_index`):**
 ```sql
 CREATE INDEX ix_inbox_events_andreani_unmatched
   ON inbox_events (created_at DESC)
@@ -1120,26 +1101,22 @@ Implicaciones:
 - `andreani_match_latency` (opcional: desde `occurred_at` del primer MATCH)
 - `andreani_ambiguous_match_total`
 
-#### 5.8.8 Archivos de implementación (B.5)
+#### 5.8.8 Implementation files (B.5)
 
-**Patrón:** un directorio `repositories/{carrier}/` por operador OOLL (plantilla Andreani para integraciones futuras).
+**Pattern:** one `repositories/{carrier}/` directory per OOLL operator (Andreani template for future integrations).
 
-| Pieza | Ubicación | Status |
-|-------|-----------|--------|
-| Shared OOLL engine (matrix + watermark + outbox) | `application/oollProcessing/oollProcessing.service.ts` — **§5.9** | **DONE** |
-| Orquestación ingest Andreani (thin facade) | `consumeAndreaniEvents.useCase.ts` | **DONE** |
-| Integración Andreani (inbox + match + apply + projection) | `repositories/andreani/andreani.repository.ts` | **DONE** |
-| Mapper Andreani | `repositories/andreani/andreani.repository.mapper.ts` | **DONE** |
-| Traducción estado | `statusMappings` + `OollProcessingService` | **DONE** |
-| Schema `EventStatus.UNMATCHED` | `schema.prisma` + migrations | **DONE** |
-| Simulador local Fenix consume | `simulateAndreaniEvents.js` | **DONE** |
-| Tests OOLL engine | `test/unit/ingestor/oollProcessing.service.spec.ts` | **DONE** |
-| Tests Andreani facade | `test/unit/ingestor/consumeAndreaniEvents.useCase.spec.ts` | **DONE** — `ambiguous_match` deferred |
+| Piece | Location |
+|-------|----------|
+| Shared OOLL engine | `application/oollProcessing/oollProcessing.service.ts` — §5.9 |
+| Andreani ingest facade | `consumeAndreaniEvents.useCase.ts` |
+| Andreani persistence | `repositories/andreani/andreani.repository.ts` |
+| Andreani mapper | `repositories/andreani/andreani.repository.mapper.ts` |
+| Status translation | `statusMappings` + `OollProcessingService` |
+| Local Fenix simulator | `simulateAndreaniEvents.js` |
 
 ### 5.9 `OollProcessingService` extraction (multi-carrier readiness)
 
-**Status:** **DONE** (2026-06-25 — E2E `testing-orchestrator` run `2026-06-25T16-33-08-710Z`, `status: passed`, `softFailureCount: 0`).  
-**Plan tracker:** `plan.md` § **B.5.8** (status only; this section is the canonical spec).  
+**Plan tracker:** `plan.md` § B.5.8.  
 **Goal:** Extract carrier-agnostic OOLL processing (Block 5.3 matrix, watermark delta, listable gate, outbox payload assembly) into a reusable application service. Each logistics operator (Andreani today; OCASA, ClicPaq, MOOVA, etc. later) keeps **only** wire-format adaptation, package MATCH/UNMATCHED, and evidence persistence in its own consumer + repository.
 
 #### 5.9.1 Problem (resolved in B.5.8)
@@ -1293,7 +1270,7 @@ Any refactor that extracts `OollProcessingService` **must include a correspondin
 | 3 | Slim `ConsumeAndreaniEventsUseCase` to: dedupe → MATCH → adapter → `OollProcessingService` → repository apply → inbox |
 | 4 | Register service in `ingestor.provider.ts` / `ingestor.types.ts` |
 | 5 | **Rewrite** unit tests per §5.9.7 |
-| 6 | Update §5.8.8 table status; mark `plan.md` B.5.8 **DONE** | **DONE** — E2E `2026-06-25T16-33-08-710Z` |
+| 6 | Update §5.8.8 file table; record completion in `plan.md` B.5.8 |
 
 **Suggested files after extraction:**
 
