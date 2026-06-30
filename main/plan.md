@@ -32,7 +32,7 @@ Operational + design source for `shipments-history-api/`, `shipments-history-pro
 | **B.2.6** | Tests: idempotent-claim watermark + replay depth | API | **PARTIAL** |
 | **D.1** | `POST /ingestor/journeys/:journeyId/reconcile/chunk` (solo si non-LPC reconcile sigue en scope v1) | API | **NOT STARTED** |
 | **D.2** | Script reconciliation loop local | tooling | **NOT STARTED** |
-| **EP.1** | Identidad de drafts `EP_READY` con `EP_BASE` reutilizado (key sintética `EP_BASE + receivedDateEpochMs`, columna `ep_base` searchable no-unique, promoción `readyToCollectAt` del draft `OPEN` más nuevo, lifecycle draft). Spec completa: `duplicated-ep-tracking.md` | API + seeders + orchestrator | **SPEC** (not started) |
+| **EP.1** | Identidad de drafts `EP_READY` con `EP_BASE` reutilizado (key sintética `EP_BASE + receivedDateEpochMs`, columna `ep_base` searchable no-unique, promoción `readyToCollectAt` del draft `OPEN` más nuevo, lifecycle draft, fallback `classification`→último draft / draft sintético, flag de exclusión KPI). Spec completa: `duplicated-ep-tracking.md` | API + seeders + orchestrator | **SPEC** (not started) |
 
 **Fuera de scope v1 activo:** cancel manual (`B.8.5`); `milestoneKey: FAILED` como terminal (fallos OOLL **proyectan** macro `FAILED`, no congelan ciclo); SP.2 / Block 13 (particionado + TTL search); UNMATCHED replay v2; inbox/outbox monthly partitioning + closure tables (forward-looking — see § 3.1).
 
@@ -284,6 +284,8 @@ Acceptance SP.1 = relative improvement ≥30% in stress p95 vs prior baseline on
 | D-15 | **Draft identity `EP.1`:** cada `EP_READY` crea draft propio con key `EP_BASE + receivedDateEpochMs`; `EP_BASE` searchable no-unique (no `PackageIdentifierLink`); promueve `readyToCollectAt` del draft `OPEN` más **nuevo**. Colisión canónica `EP_BASE`/`EP_FULL` reutilizado = diferida | Acepta duplicados sin tocar identidad canónica; ver `duplicated-ep-tracking.md` |
 | D-16 | **`readyToCollectAt` más nuevo (no el más viejo):** la promoción toma el draft `OPEN` con `receivedDateEpochMs DESC` (última intención conocida) | Caso anómalo excluido de KPI igual; decisión explícita, no implícita |
 | D-17 | **`FIRST_MILE` leg en `EP_READY` (PENDIENTE decidir):** quitar `ensureFirstMileShipmentLink` de `consumeEpReadyToCollectOrders` es **global** (toca A.1 DONE), no draft-only. Alternativa: mover creación a materialización | No bakear el cambio bajo "identidad de drafts"; verificar ripple en `applyOeLaunchTrailTransitions` |
+| D-18 | **Fallback `classification` (`EP.1`):** si `classification` llega antes que `journey`, reasocia al último draft elegible; si no existe, crea draft sintético derivando `EP_BASE` desde `EP_FULL`. Sigue **persist-only** | Preserva trazabilidad operativa sin abrir aún identidad canónica de `EP_FULL` |
+| D-19 | **Casos `EP_BASE` reutilizado = fuera de KPI normal:** producir flag operativo (reusar `reconciliationFlags`) y excluir de SLA `readyToCollectAt -> oeLaunchAt`; timeline puede reconstruirse “loose” desde `classification`/`dispatch` | No mezclar outliers por tracking reutilizado con operación estándar |
 
 ---
 
