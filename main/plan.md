@@ -32,6 +32,7 @@ Operational + design source for `shipments-history-api/`, `shipments-history-pro
 | **B.2.6** | Tests: idempotent-claim watermark + replay depth | API | **PARTIAL** |
 | **D.1** | `POST /ingestor/journeys/:journeyId/reconcile/chunk` (solo si non-LPC reconcile sigue en scope v1) | API | **NOT STARTED** |
 | **D.2** | Script reconciliation loop local | tooling | **NOT STARTED** |
+| **EP.1** | Identidad de drafts `EP_READY` con `EP_BASE` reutilizado (key sintética `EP_BASE + receivedDateEpochMs`, columna `ep_base` searchable no-unique, promoción `readyToCollectAt` del draft `OPEN` más nuevo, lifecycle draft). Spec completa: `duplicated-ep-tracking.md` | API + seeders + orchestrator | **SPEC** (not started) |
 
 **Fuera de scope v1 activo:** cancel manual (`B.8.5`); `milestoneKey: FAILED` como terminal (fallos OOLL **proyectan** macro `FAILED`, no congelan ciclo); SP.2 / Block 13 (particionado + TTL search); UNMATCHED replay v2; inbox/outbox monthly partitioning + closure tables (forward-looking — see § 3.1).
 
@@ -90,6 +91,8 @@ Two services with non-overlapping responsibilities, plus a local Fenix emulator:
 **Ingest pattern (inbox/outbox):** persist raw first (latency-min), normalize in processing, emit via transactional outbox. Idempotency anchor: `(source/carrier, externalEventId)`. Event Time (`occurredAt` / `fechaHora`) orders timelines; arrival time is pipeline latency. Andreani is a raw-passthrough source: `carrier_status_mappings` translate raw → canonical.
 
 > **Forward-looking (NOT v1):** N shipments per Delivery with **partial delivery as a first-class case**, inbox/outbox monthly RANGE partitioning + auto-partition procedures, closure tables for dynamic order splitting, and worker-claim mechanism choice (optimistic `version` vs `FOR UPDATE SKIP LOCKED`). Build so these can be absorbed without a paradigm change.
+
+> **Draft sub-state (spec `EP.1`, `duplicated-ep-tracking.md`):** `EnvíoPack` reutiliza `EP_BASE` (`trackingNumber`) para órdenes distintas. Para no colapsar anuncios `EP_READY` sobre un mismo `Package`, los drafts tempranos llevan key sintética `EP_BASE + receivedDateEpochMs` y un lifecycle en `metadata.draftState` (`OPEN` → `PROMOTED` / `SUPERSEDED`). El draft **no** proyecta y **no** toma el link `EP_BASE` (reservado al package canónico). La unicidad canónica con `EP_BASE`/`EP_FULL` reutilizado queda **diferida** (se resuelve sólo la capa draft). `Package` sigue siendo la raíz canónica.
 
 ### 3.2 Projection watermark (`package_projection_watermarks`)
 
@@ -278,6 +281,9 @@ Acceptance SP.1 = relative improvement ≥30% in stress p95 vs prior baseline on
 | D-11 | **Unmapped Andreani:** inbox `PROCESSED`, no events, no projection (v1) | e.g. `ExpedicionHojaDeRutaDeViaje` |
 | D-13 | **`Visita` + text `"Entregado"` without `motivo` 99:** unmapped today — **analysis before fix** (B.5.11) | Trace legacy TMS/Delivery Manager first |
 | D-14 | **Non-warehouse path:** model must not hardcode warehouse as the only entry/bootstrap (§5) | EnvíoPack routes high-volume parcels straight to OOLL |
+| D-15 | **Draft identity `EP.1`:** cada `EP_READY` crea draft propio con key `EP_BASE + receivedDateEpochMs`; `EP_BASE` searchable no-unique (no `PackageIdentifierLink`); promueve `readyToCollectAt` del draft `OPEN` más **nuevo**. Colisión canónica `EP_BASE`/`EP_FULL` reutilizado = diferida | Acepta duplicados sin tocar identidad canónica; ver `duplicated-ep-tracking.md` |
+| D-16 | **`readyToCollectAt` más nuevo (no el más viejo):** la promoción toma el draft `OPEN` con `receivedDateEpochMs DESC` (última intención conocida) | Caso anómalo excluido de KPI igual; decisión explícita, no implícita |
+| D-17 | **`FIRST_MILE` leg en `EP_READY` (PENDIENTE decidir):** quitar `ensureFirstMileShipmentLink` de `consumeEpReadyToCollectOrders` es **global** (toca A.1 DONE), no draft-only. Alternativa: mover creación a materialización | No bakear el cambio bajo "identidad de drafts"; verificar ripple en `applyOeLaunchTrailTransitions` |
 
 ---
 
@@ -291,6 +297,7 @@ Acceptance SP.1 = relative improvement ≥30% in stress p95 vs prior baseline on
 - Do not insert `outbox_ingestor` or upsert watermark from gate use cases (outbox activates post-return via `EventPublisherInterceptor` → `FenixOutboxProducer`).
 - Do not update projection watermark post-`SENT` (claim in producer tx with outbox `PENDING`).
 - Do not `Promise.all` / fixed-delay between Fenix bulk chunks; do not bulk-relay `eventId` retries.
+- Do not project `EP_READY` drafts, give them an `EP_BASE` `PackageIdentifierLink`, or emit from `consumeWmsPackageClassification` when adding the `EP.1` draft fallback (stays persist-only).
 
 ---
 

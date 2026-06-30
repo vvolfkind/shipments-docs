@@ -14,6 +14,16 @@ Eso cambia el análisis:
 
 El problema actual sigue siendo que, si usamos `EP_BASE` como `Package.externalId` único, distintos anuncios de ready colapsan sobre un mismo package y contaminan `readyToCollectAt`, `PackageShipment` y la lectura histórica.
 
+### Estado real del código hoy (no asumir un solo package)
+
+El sistema ya corre un modelo de **dos packages**, esto cambia el encuadre de §3 y §5:
+
+- `EP_READY` crea/reusa un package con `externalId = EP_BASE` (`consumeEpReadyToCollectOrders.useCase.ts:67`). Es este package el que colapsa ante duplicados: `findByExternalId(trackingNumber)` lo reusa y **sobreescribe** `readyToCollectAt` (`:109`), aunque cada `EP_READY` sí conserva su propio `PackageEvent` (UNIQUE por `externalEventId`).
+- `processJourneyReceiptChunk.reconcileReceiptItem` crea **otro** package con `externalId = packageExternalId` (`EP_BASE-01`), y hoy enlaza el draft sólo de forma floja vía `metadata.draftPackageId` (`:170-177`). El identifier link `EP_BASE` queda en el draft porque `ensureIdentifierLink` corta si el identifier ya existe.
+- Hoy **nada** copia `readyToCollectAt` del draft al package materializado, y `consumeOeLaunch.useCase.ts:261` sólo emite `readyToCollectAt` si ya está seteado en el package materializado. En la práctica el `readyToCollectAt` de first mile **se pierde en proyección hoy**.
+
+Implicancia: la promoción de §5 no es sólo "preservar historia", es **comportamiento nuevo** que recupera un timestamp hoy perdido. Y el path existente `metadata.draftPackageId` (`reconcileReceiptItem:170-177`) debe **reescribirse/retirarse**, no sólo complementarse: con la key sintética, `findByExternalId(item.groupId)` pasa a devolver `null` y el enlace draft↔materializado actual desaparece en silencio.
+
 ## Objetivo
 
 Aceptar drafts duplicados de `EP_BASE` con el menor cambio posible, preservando historia y evitando por ahora una redefinición completa de la identidad canónica materializada.
@@ -63,6 +73,8 @@ Semántica:
 
 Como `receivedDate` lo genera `ep-collect-webhook`, esta key no depende de un timestamp legado del proveedor.
 
+> **Supuesto externo a validar.** La premisa de que `ep-collect-webhook` estampa `time.Now().UTC()` vive en **otro repo** (`ep-collect-webhook/cmd/api/handlers/notify_delivery.go`), no verificable desde acá. La unicidad de la key depende de que `receivedDate` sea distinto por anuncio: **dos `EP_READY` en el mismo milisegundo seguirían colisionando**. Si ese riesgo es real, agregar un desempate (p. ej. `externalEventId` o un sufijo) a la key.
+
 ## 2. Búsqueda por `EP_BASE`
 
 Para reconciliar luego vía LPC, el sistema necesita buscar drafts por `EP_BASE` sin escanear toda la tabla.
@@ -78,6 +90,11 @@ La spec no fija todavía si esto se resuelve con:
 - una columna dedicada indexada en `packages`
 - una proyección equivalente indexada
 - otra variante equivalente que evite full scan
+
+**Trabajo concreto implicado (hoy no existe):**
+
+- No hay columna searchable de `EP_BASE` en `packages`. La opción recomendada es **una columna dedicada indexada no-unique** (p. ej. `ep_base` + índice `ix_packages_ep_base`) vía migración Prisma. Es la pieza de trabajo más grande que la spec deja "abierta".
+- El contrato `IPackageRepository` sólo tiene `findByExternalId` / `save` / `update`: hace falta un **método nuevo** (p. ej. `findOpenDraftsByEpBase(epBase)`), no se puede resolver con lo existente.
 
 Lo que sí fija es la semántica:
 
@@ -122,12 +139,16 @@ Cuando `processJourneyReceiptChunk` recibe un `receiptItem` con `groupId = EP_BA
 
 Si existe `selectedDraft`:
 
-- promueve su `readyToCollectAt` al package materializado si ese package aún no lo tiene
+- promueve su `readyToCollectAt` al package materializado si ese package aún no lo tiene (**comportamiento nuevo**: hoy ese timestamp no se promueve y se pierde en proyección — ver "Estado real del código hoy")
 - guarda referencia de trazabilidad al draft promovido
 - marca `selectedDraft` como `PROMOTED`
 - marca drafts abiertos anteriores del mismo `EP_BASE` como `SUPERSEDED`
 
+> **Decisión a registrar — elegir el draft más nuevo:** tomar el `receivedDateEpochMs DESC` es "última intención conocida". Para un `readyToCollectAt` de first mile, el draft **más viejo** sería discutiblemente más correcto (primera vez que estuvo listo). Como estos casos quedan excluidos de KPI igual, se elige el más nuevo, pero es una decisión de negocio que debe quedar en el Decision log de `plan.md`, no implícita.
+
 Esta spec no redefine todavía cómo debe resolverse `EP_FULL` si existe una colisión histórica posterior. Solo asegura que, cuando aparezca la materialización, el sistema puede recuperar el draft correcto más reciente.
+
+> **Límite: la colisión canónica sigue abierta.** Esta spec resuelve la unicidad **sólo en la capa draft**. En materialización, el package materializado sigue intentando `ensureIdentifierLink(pkg.id, EP_BASE, 'EP_BASE')`, y `uq_package_identifier_link` es unique. Si `EP_BASE` se reutiliza para una orden **realmente distinta** más tarde, el segundo package materializado **no** puede tomar el link `EP_BASE` (first-writer-wins; no crashea, pero queda sin link). El problema de unicidad canónica no se resuelve, se posterga (ver Pendiente explícito + §5 `EP_FULL`).
 
 ## 5.b Fallback por `classification`
 
@@ -142,6 +163,10 @@ EP_BASE derivado + classificationEventTimestampEpochMs
 ```
 
 Como `classification` hoy trae `packageExternalId` y no `groupId`, este fallback asume derivación por convención desde `EP_FULL` hacia `EP_BASE` mientras no exista una fuente mejor.
+
+> **Caveat de la derivación `EP_FULL → EP_BASE` (frágil):** la convención hoy es stripear `-01` (lo confirma el seeder: `packageExternalId = ${epBase}-01`). Pero órdenes multi-bulto reales (`-01`, `-02`, …) colapsarían todas al mismo `EP_BASE` draft. Mientras no haya `groupId` en `classification`, este fallback es **best-effort** y refuerza por qué el caso queda fuera de KPI.
+
+> **Invariante a preservar — `consumeWmsPackageClassification` sigue persist-only.** Hoy es Block 6.4 "persist only, no outbox / no proyección" (`plan.md` §9 Do Not Do). Agregar lookup de draft + creación de draft sintético **no** debe introducir emisión a projector. Mantener esa invariante explícita para que la implementación no emita por accidente.
 
 Objetivo del fallback:
 
@@ -188,6 +213,10 @@ En práctica:
 
 La intención no es esconder el caso, sino separarlo de la medición de operación normal.
 
+> **Implementación de la marca de exclusión — reusar `reconciliationFlags`.** `consumeWmsPackageClassification` ya escribe `metadata.reconciliationFlags` (`missingJourneyAnnouncement`, `missingOeLaunch`, `:35`). El flag de tracking reutilizado (p. ej. `duplicatedEpBase` / `looseTraceability`) debe sumarse a ese mismo array, no inventar un campo nuevo.
+>
+> **Quién consume el flag está fuera de scope.** El cálculo de KPI no vive en este repo. Esta spec sólo garantiza que el flag se **produce**; honrarlo en analítica/projector queda fuera de este turno.
+
 ## 7. `Shipment FIRST_MILE` en drafts
 
 Se mantiene la recomendación de no crear identidad logística reusable desde el draft temprano.
@@ -201,6 +230,13 @@ Motivo:
 - hoy `shipments(sourceSystem, carrierCode, trackingNumber)` también es único
 - si EnvioPack reutiliza `EP_BASE`, compartiríamos un mismo `Shipment` entre bultos distintos
 - como el draft no proyecta ni es identidad canónica, esa relación temprana agrega más contaminación que valor
+
+> **⚠️ Esto NO es un cambio draft-específico — es global, y toca A.1 (DONE).** Quitar la llamada en `consumeEpReadyToCollectOrders` elimina la creación de `Shipment FIRST_MILE` + `PackageShipment` para **todos** los packages, no sólo los duplicados. Ripple verificado:
+> - `applyOeLaunchTrailTransitions` (`shipment.repository.ts:113-121`) hace `UPDATE package_shipments SET exited_at … WHERE trail_type = 'FIRST_MILE'`: sin fila first mile, simplemente actualiza 0 filas (no crashea).
+> - `consumeOeLaunch.useCase.ts:214` igual hardcodea `trailTransitions.closeFirstMile` en el payload, así que el projector no se rompe.
+> - Resultado: el write-model de la API quedaría **sin leg `FIRST_MILE` para ningún package**. Como `C.4` (`segments[]`) está `NOT STARTED`, es tolerable en v1, pero es un cambio de dominio deliberado (desaparece el tramo first mile) que **debe ir como decisión propia en el Decision log de `plan.md`**, no entrar de contrabando bajo "identidad de drafts".
+>
+> Alternativa a evaluar si se quiere conservar A.1: mover la creación de `Shipment FIRST_MILE` a la materialización (journey / `OE_LAUNCH`) en vez de eliminarla del todo.
 
 ## Invariantes resultantes
 
@@ -225,10 +261,12 @@ Motivo:
 
 ### `processJourneyReceiptChunk.useCase.ts`
 
-- buscar drafts por `EP_BASE`
+- **reescribir/eliminar el path actual `metadata.draftPackageId` (`:170-177`)**: con la key sintética, `findByExternalId(item.groupId)` deja de encontrar el draft
+- buscar drafts por `EP_BASE` (método nuevo de repo)
 - elegir el draft `OPEN` más nuevo por `receivedDateEpochMs`
-- promover `readyToCollectAt` desde ese draft al package materializado si aún no existe
+- promover `readyToCollectAt` desde ese draft al package materializado si aún no existe (timestamp hoy no promovido)
 - marcar drafts como `PROMOTED` / `SUPERSEDED`
+- mantener el link `EP_BASE` reservado al package materializado (first-writer-wins; ver límite de colisión canónica en §5)
 
 ### `consumeWmsPackageClassification.useCase.ts`
 
@@ -240,7 +278,8 @@ Motivo:
 
 Alcance mínimo esperado:
 
-- una consulta indexada para buscar drafts por `EP_BASE`
+- **migración Prisma**: columna `ep_base` indexada no-unique en `packages` (o equivalente que evite full scan) — hoy no existe
+- **método nuevo en `IPackageRepository`** (p. ej. `findOpenDraftsByEpBase`): el contrato actual sólo tiene `findByExternalId` / `save` / `update`
 - una forma de ordenar por `receivedDateEpochMs DESC`
 - una forma de actualizar metadata/estado de drafts resueltos
 
